@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./rules.yaml:/app/rules.yaml   # edit rules without rebuilding
+      - ./data:/app/data               # keeps emails + state between restarts

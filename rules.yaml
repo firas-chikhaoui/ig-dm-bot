@@ -1,0 +1,110 @@
+# ============================================================
+#  ig-dm-bot rules
+#  Edit this file while the bot runs: it reloads automatically.
+#  If you break the YAML, the bot keeps the last good version and logs an error.
+# ============================================================
+
+settings:
+  # How keywords are matched by default:
+  #   word     -> keyword must appear as a whole word ("guide" matches "send guide pls")
+  #   contains -> keyword anywhere in the comment ("guide" matches "guides")
+  #   exact    -> comment must be exactly the keyword
+  default_match: word
+
+  # Used when a flow starts with a follow-check or email step: Instagram only lets
+  # us send ONE private reply to a comment, so we send this opener with a button first.
+  opener:
+    text: "Hey {username}! Tap below 👇"
+    button: "Continue"
+
+# ------------------------------------------------------------
+# Reels / posts to watch.
+#   id:  the media id of the reel (see README: "Find your reel id")
+#        use "*" to match comments on ANY post or reel
+#   keywords: one or more words that trigger the bot
+#   comment_replies: public reply under the comment (one is picked at random)
+#   flow: which DM flow to start (defined below)
+#   once_per_user: true = each person gets the DM only once per reel
+# ------------------------------------------------------------
+reels:
+  - id: "17900000000000000"          # <- replace with your reel's media id
+    name: "Free guide reel"
+    keywords: ["guide", "link"]
+    comment_replies:
+      - "Sent you a DM 📩"
+      - "Check your DMs {username} 🔥"
+      - "Done! Look in your inbox 👀"
+    flow: free_guide
+
+  # Example catch-all: any post, keyword "waitlist"
+  - id: "*"
+    keywords: ["waitlist"]
+    comment_replies: ["Check your DMs 🙌"]
+    flow: waitlist_only
+
+# Optional: people can also DM you the keyword directly
+dm_triggers:
+  - keywords: ["guide"]
+    flow: free_guide
+
+# ------------------------------------------------------------
+# DM flows. Each step is ONE of:
+#   message:         text (+ up to 3 buttons, titles max 20 chars)
+#                    button -> next: <step>   (goes to another step)
+#                    button -> url: <link>    (opens a website)
+#                    next: <step>             (auto-continue, only when no buttons)
+#   require_follow:  ok: <step if following>, not_following: <step otherwise>
+#   ask_email:       prompt, list, success, invalid, next (optional)
+# Placeholders: {username}
+# The first step of a flow started from a comment should be a message with a
+# button (the person has to tap it before we can continue the conversation).
+# ------------------------------------------------------------
+flows:
+  free_guide:
+    start: welcome
+    steps:
+      welcome:
+        message: "Hey {username}! 👋 Thanks for your comment. Want the free guide?"
+        buttons:
+          - title: "Yes, send it 🙌"
+            next: check_follow
+
+      check_follow:
+        require_follow:
+          ok: send_link
+          not_following: ask_to_follow
+
+      ask_to_follow:
+        message: "Almost there! Follow my account first, then tap the button 👇"
+        buttons:
+          - title: "I followed ✅"
+            next: check_follow
+
+      send_link:
+        message: "Here's your guide 🎁"
+        buttons:
+          - title: "Open the guide"
+            url: "https://example.com/guide"
+          - title: "Join the waitlist"
+            next: ask_email
+
+      ask_email:
+        ask_email:
+          prompt: "Drop your email here and I'll add you to the waitlist 📧"
+          list: waitlist
+          invalid: "Hmm, that doesn't look like an email 🤔 Can you send it again?"
+          success: "You're on the list! 🎉 I'll email you at {email}"
+
+  waitlist_only:
+    start: welcome
+    steps:
+      welcome:
+        message: "Hey {username}! Want early access?"
+        buttons:
+          - title: "Yes, add me"
+            next: ask_email
+      ask_email:
+        ask_email:
+          prompt: "Send me your email 📧"
+          list: waitlist
+          success: "Done ✅ you're on the waitlist!"
