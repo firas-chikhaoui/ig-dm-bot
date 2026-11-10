@@ -84,6 +84,7 @@ def parse_rules(data: dict[str, Any]) -> Rules:
         raise RulesError("rules.yaml must be a mapping")
     settings = data.get("settings") or {}
     default_match = settings.get("default_match", "word")
+    _check_retries(settings.get("follow_max_retries"), "settings")
 
     flows = data.get("flows") or {}
     if not isinstance(flows, dict):
@@ -176,11 +177,21 @@ def _validate_step(fname: str, sname: str, step: Any, steps: dict) -> None:
             raise RulesError(f"{where}: require_follow needs 'ok' and 'not_following'")
         check_target(rf["ok"], "ok")
         check_target(rf["not_following"], "not_following")
+        check_target(rf.get("still_not_following"), "still_not_following")
+        check_target(rf.get("gave_up"), "gave_up")
+        _check_retries(rf.get("max_retries"), where)
     elif kind == "ask_email":
         ae = step["ask_email"] or {}
         if "prompt" not in ae:
             raise RulesError(f"{where}: ask_email needs 'prompt'")
         check_target(ae.get("next"), "next")
+
+
+def _check_retries(value: Any, where: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RulesError(f"{where}: max_retries must be a whole number >= 0")
 
 
 class RulesStore:

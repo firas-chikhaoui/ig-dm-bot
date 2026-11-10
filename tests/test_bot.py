@@ -134,3 +134,81 @@ def test_word_matching():
                          "flows": {"f": {"steps": {"a": {"message": "hi"}}}}})
     assert rules.find_reel_rule("1", "LINK pls")
     assert not rules.find_reel_rule("1", "linkedin")
+
+
+def _last_text(api):
+    msg = api.sent[-1][1]
+    return msg["text"] if "text" in msg else msg["attachment"]["payload"]["text"]
+
+
+def test_follow_gate_retry_message_and_limit(setup):
+    bot, api = setup
+    bot.handle_webhook(comment("c1", "guide"))
+    check = make_payload("free_guide", "check_follow")
+
+    bot.handle_webhook(click(check, mid="m1"))
+    assert "Follow my account" in _last_text(api)
+    # Later failed checks use the "still not following" message, up to max_retries (3)
+    for i in range(3):
+        bot.handle_webhook(click(check, mid=f"r{i}"))
+        assert "can't see your follow" in _last_text(api)
+    # Limit reached: gave_up once, then silence
+    bot.handle_webhook(click(check, mid="g1"))
+    assert "No worries" in _last_text(api)
+    count = len(api.sent)
+    bot.handle_webhook(click(check, mid="g2"))
+    assert len(api.sent) == count
+    assert bot.db.stats()["follow_gave_up"] == 1
+
+    # Following later still unlocks the link, and resets the counter
+    api.following = True
+    bot.handle_webhook(click(check, mid="ok"))
+    assert "Here's your guide" in _last_text(api)
+    api.following = False
+    bot.handle_webhook(click(check, mid="again"))
+    assert "Follow my account" in _last_text(api)
+
+
+def _gate_rules(tmp_path, **extra):
+    data = {"settings": {"follow_max_retries": 1},
+            "dm_triggers": [{"keywords": ["go"], "flow": "f"}],
+            "flows": {"f": {"steps": {
+                "check": {"require_follow": {"ok": "yes", "not_following": "no", **extra}},
+                "yes": {"message": "yes"},
+                "no": {"message": "no"}}}}}
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return RulesStore(str(path))
+
+
+def test_follow_gate_defaults_without_optional_steps(tmp_path):
+    api = FakeAPI()
+    bot = Bot(api, _gate_rules(tmp_path), Storage(":memory:"), own_id=ME)
+    bot.handle_webhook(text_msg("go", mid="s"))
+    assert _last_text(api) == "no"   # first check
+    bot.handle_webhook(click(make_payload("f", "check"), mid="a"))
+    assert _last_text(api) == "no"   # re-check falls back to not_following
+    n = len(api.sent)
+    bot.handle_webhook(click(make_payload("f", "check"), mid="b"))
+    assert len(api.sent) == n        # settings limit (1) reached, no gave_up -> silent
+
+
+def test_follow_gate_step_overrides_limit(tmp_path):
+    api = FakeAPI()
+    bot = Bot(api, _gate_rules(tmp_path, max_retries=0, gave_up="yes"), Storage(":memory:"),
+              own_id=ME)
+    bot.handle_webhook(text_msg("go", mid="s"))
+    bot.handle_webhook(click(make_payload("f", "check"), mid="a"))
+    assert _last_text(api) == "yes"  # gave_up step right away
+
+
+def test_invalid_follow_retry_config_rejected():
+    base = {"ok": "a", "not_following": "a"}
+    for bad in ({"max_retries": -1}, {"max_retries": "x"}, {"gave_up": "missing"},
+                {"still_not_following": "missing"}):
+        with pytest.raises(RulesError):
+            parse_rules({"flows": {"f": {"steps": {
+                "c": {"require_follow": {**base, **bad}}, "a": {"message": "hi"}}}}})
+    with pytest.raises(RulesError):
+        parse_rules({"settings": {"follow_max_retries": -2},
+                     "flows": {"f": {"steps": {"a": {"message": "hi"}}}}})

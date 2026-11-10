@@ -14,6 +14,7 @@ log = logging.getLogger("bot")
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 PAYLOAD_PREFIX = "igbot"
 MAX_CHAIN = 10  # safety: max auto-chained steps per event
+DEFAULT_FOLLOW_RETRIES = 3  # re-checks after the first "not following"
 
 
 def make_payload(flow: str, step: str) -> str:
@@ -101,6 +102,7 @@ class Bot:
                 log.exception("public comment reply failed")
 
         self.db.set_state(user_id, rule.flow, None, username=username)
+        self.db.reset_follow_failures(user_id, rule.flow)
         self.db.log_event(user_id, "flow_started", rule.flow)
         # First DM must be a "private reply" to the comment.
         self.run_step(user_id, rule.flow, rules.flows[rule.flow]["start"], username,
@@ -150,6 +152,7 @@ class Bot:
         if trig:
             rules = self.rules.get()
             self.db.set_state(sender, trig.flow, None)
+            self.db.reset_follow_failures(sender, trig.flow)
             self.db.log_event(sender, "flow_started", trig.flow)
             self.run_step(sender, trig.flow, rules.flows[trig.flow]["start"], username)
 
@@ -221,17 +224,43 @@ class Bot:
             return
 
         if "require_follow" in step:
-            rf = step["require_follow"]
-            following = self.api.is_following(user_id)
-            self.db.log_event(user_id, "follow_check", "yes" if following else "no")
-            nxt = rf["ok"] if following else rf["not_following"]
-            self.run_step(user_id, flow, nxt, username, depth=depth + 1)
+            nxt = self._follow_gate(user_id, flow, step_name, step["require_follow"])
+            if nxt:
+                self.run_step(user_id, flow, nxt, username, depth=depth + 1)
             return
 
         if "ask_email" in step:
             self._send(user_id, step["ask_email"]["prompt"], username=username)
             self.db.set_state(user_id, flow, step_name)
             return
+
+    def _follow_gate(self, user_id: str, flow: str, step_name: str,
+                     rf: dict[str, Any]) -> str | None:
+        """Return the next step of a follow check, or None to stay silent.
+
+        1st failed check  -> not_following
+        next failures     -> still_not_following (falls back to not_following)
+        over max_retries  -> gave_up once (if set), then silence
+        """
+        following = self.api.is_following(user_id)
+        self.db.log_event(user_id, "follow_check", "yes" if following else "no")
+        if following:
+            self.db.reset_follow_failures(user_id, flow)
+            return rf["ok"]
+
+        attempts = self.db.add_follow_failure(user_id, flow, step_name)
+        if attempts == 1:
+            return rf["not_following"]
+        limit = rf.get("max_retries",
+                       self.rules.get().settings.get("follow_max_retries", DEFAULT_FOLLOW_RETRIES))
+        if limit is None or attempts - 1 <= int(limit):
+            return rf.get("still_not_following") or rf["not_following"]
+        if attempts - 1 == int(limit) + 1:
+            log.info("user %s: follow check retry limit (%s) reached in flow %s",
+                     user_id, limit, flow)
+            self.db.log_event(user_id, "follow_gave_up", flow)
+            return rf.get("gave_up")
+        return None  # already told them; don't keep messaging
 
     def _send(self, user_id: str, text: str, **ctx: Any) -> None:
         self.api.send({"id": user_id}, {"text": render(text, **ctx)})

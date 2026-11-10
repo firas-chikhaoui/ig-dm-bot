@@ -72,8 +72,20 @@ The fully commented version is in [`rules.yaml`](rules.yaml).
 | Step | What it does |
 |---|---|
 | `message` | Sends text with up to 3 buttons (`next:` jumps to a step, `url:` opens a link). Without buttons, `next:` continues automatically. |
-| `require_follow` | Goes to `ok` if the user follows you, otherwise to `not_following`. |
+| `require_follow` | Goes to `ok` if the user follows you, otherwise to `not_following`. Optional: `still_not_following` (step used on later failed checks so the bot doesn't repeat itself), `max_retries` and `gave_up` (see below). |
 | `ask_email` | Asks for an email, validates it, saves it to `list`, then sends `success` and optionally goes to `next`. |
+
+**Follow gate retries.** The first failed check goes to `not_following`; each further failed check goes to `still_not_following` (or `not_following` again if you leave it out). After `max_retries` re-checks (default: `settings.follow_max_retries`, which defaults to 3) the bot sends the `gave_up` step once, if set, and then stops answering that check. If the person does follow later and taps the button, they still get `ok`. The counter resets when they follow or start the flow again.
+
+```yaml
+check_follow:
+  require_follow:
+    ok: send_link
+    not_following: ask_to_follow
+    still_not_following: still_not_following
+    max_retries: 3
+    gave_up: gave_up
+```
 
 > ⚠️ Instagram allows only **one** private reply per comment. The first DM of a flow should therefore be a message **with a button**: when the user taps it, the conversation opens and the bot can continue. If a flow starts with a follow check or email step, the bot sends a short opener with a button automatically.
 

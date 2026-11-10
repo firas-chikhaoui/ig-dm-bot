@@ -17,6 +17,10 @@ settings:
     text: "Hey {username}! Tap below 👇"
     button: "Continue"
 
+  # Follow gate: how many times a person may tap "I followed" while still not
+  # following before the bot stops answering (a step can override this with max_retries).
+  follow_max_retries: 3
+
 # ------------------------------------------------------------
 # Reels / posts to watch.
 #   id:  the media id of the reel (see README: "Find your reel id")
@@ -54,6 +58,11 @@ dm_triggers:
 #                    button -> url: <link>    (opens a website)
 #                    next: <step>             (auto-continue, only when no buttons)
 #   require_follow:  ok: <step if following>, not_following: <step otherwise>
+#                    still_not_following: <step>  (optional, used on later checks
+#                                                  so the bot doesn't repeat itself)
+#                    max_retries: <n>             (optional, overrides the setting)
+#                    gave_up: <step>              (optional, sent once when the
+#                                                  limit is reached, then silence)
 #   ask_email:       prompt, list, success, invalid, next (optional)
 # Placeholders: {username}
 # The first step of a flow started from a comment should be a message with a
@@ -73,9 +82,23 @@ flows:
         require_follow:
           ok: send_link
           not_following: ask_to_follow
+          still_not_following: still_not_following
+          gave_up: gave_up
 
       ask_to_follow:
         message: "Almost there! Follow my account first, then tap the button 👇"
+        buttons:
+          - title: "I followed ✅"
+            next: check_follow
+
+      still_not_following:
+        message: "Hmm, I can't see your follow yet 👀 Make sure you tapped Follow on my profile, then try again 👇"
+        buttons:
+          - title: "Check again 🔄"
+            next: check_follow
+
+      gave_up:
+        message: "No worries! Once you follow, tap below and I'll send the guide 🙌"
         buttons:
           - title: "I followed ✅"
             next: check_follow

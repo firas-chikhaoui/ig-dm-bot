@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS emails (
     created_at REAL NOT NULL,
     PRIMARY KEY (user_id, list)
 );
+CREATE TABLE IF NOT EXISTS follow_checks (
+    user_id TEXT NOT NULL,
+    flow TEXT NOT NULL,
+    step TEXT NOT NULL,
+    attempts INTEGER NOT NULL,     -- failed follow checks in a row
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (user_id, flow, step)
+);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -91,6 +99,31 @@ class Storage:
 
     def get_state(self, user_id: str) -> sqlite3.Row | None:
         return self._exec("SELECT * FROM user_state WHERE user_id = ?", (user_id,)).fetchone()
+
+    # --- follow gate -----------------------------------------------------
+    def add_follow_failure(self, user_id: str, flow: str, step: str) -> int:
+        """Count one more failed follow check and return the new total."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO follow_checks(user_id, flow, step, attempts, updated_at)
+                   VALUES (?, ?, ?, 1, ?)
+                   ON CONFLICT(user_id, flow, step) DO UPDATE SET
+                     attempts = follow_checks.attempts + 1,
+                     updated_at = excluded.updated_at""",
+                (user_id, flow, step, time.time()),
+            )
+            self._conn.commit()
+            return self._conn.execute(
+                "SELECT attempts FROM follow_checks WHERE user_id = ? AND flow = ? AND step = ?",
+                (user_id, flow, step),
+            ).fetchone()[0]
+
+    def reset_follow_failures(self, user_id: str, flow: str | None = None) -> None:
+        if flow is None:
+            self._exec("DELETE FROM follow_checks WHERE user_id = ?", (user_id,))
+        else:
+            self._exec("DELETE FROM follow_checks WHERE user_id = ? AND flow = ?",
+                       (user_id, flow))
 
     # --- emails ----------------------------------------------------------
     def save_email(self, user_id: str, username: str | None, email: str, list_name: str,
