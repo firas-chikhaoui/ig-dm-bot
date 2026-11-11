@@ -30,6 +30,12 @@ class Settings:
     graph_version: str = os.getenv("GRAPH_VERSION", "v23.0")
     graph_base: str = os.getenv("GRAPH_BASE", "https://graph.instagram.com")
 
+    # Public pages (/privacy, /data-deletion) required by Meta
+    public_url: str = os.getenv("PUBLIC_URL", "").rstrip("/")  # e.g. https://bot.example.com
+    privacy_operator: str = os.getenv("PRIVACY_OPERATOR", "")  # your name or business name
+    privacy_contact: str = os.getenv("PRIVACY_CONTACT", "")  # email people can write to
+    ig_username: str = os.getenv("IG_USERNAME", "")  # shown on the privacy page
+
     # App
     rules_path: str = os.getenv("RULES_PATH", "rules.yaml")
     db_path: str = os.getenv("DB_PATH", "data/bot.db")

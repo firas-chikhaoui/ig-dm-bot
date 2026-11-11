@@ -13,6 +13,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 📩 **DM flows with buttons**: postback buttons (go to another step) and link buttons
 - ✅ **Follow gate**: checks whether the user follows you before sending the link
 - 📧 **Email capture**: validates the email and saves it to a waitlist (export as CSV)
+- 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
 - 🧪 Tests and a `DRY_RUN` mode
@@ -99,6 +100,26 @@ check_follow:
    Permissions needed: `instagram_business_basic`, `instagram_business_manage_messages`, `instagram_business_manage_comments`.
 4. Copy the **Instagram app secret**. This is the `APP_SECRET`.
 5. In the Instagram app on your phone, go to *Settings → Messages and story replies → Message controls → Connected tools* and turn on **Allow access to messages**.
+
+### Privacy policy and data deletion (required by Meta)
+
+Meta asks every app for a **Privacy Policy URL** and a **User data deletion** option before it can go Live. The bot serves both:
+
+| URL | What it is |
+|---|---|
+| `https://YOUR-DOMAIN/privacy` | Privacy policy, filled in from `PRIVACY_OPERATOR`, `PRIVACY_CONTACT` and `IG_USERNAME` in `.env` |
+| `https://YOUR-DOMAIN/data-deletion` | Data deletion instructions (and status page for confirmation codes) |
+| `POST https://YOUR-DOMAIN/data-deletion` | Meta's *Data Deletion Request Callback* (signed with `APP_SECRET`) |
+
+In the Meta dashboard (*App settings → Basic*): paste the `/privacy` URL into **Privacy Policy URL**, and under **User data deletion** choose *Data deletion callback URL* and paste the `/data-deletion` URL. Set `PUBLIC_URL` in `.env` so the confirmation link Meta shows to the person points to your domain.
+
+People can delete their data in three ways, and each one removes their state, emails, follow-check counters and activity log entries:
+
+- DM **`delete my data`** to your account (change or turn off the phrase with `settings.data_deletion` in `rules.yaml`)
+- remove the app in Instagram's settings, which triggers the callback above
+- ask you, and you run `curl -X DELETE "https://YOUR-DOMAIN/admin/users/<instagram-user-id>?token=ADMIN_TOKEN"`
+
+> The privacy page is a sensible default for this bot, not legal advice. If you collect emails for marketing in the EU, check it against your own GDPR obligations.
 
 ### 2. Run locally
 
@@ -187,6 +208,9 @@ Then update `.env` and run `docker compose restart`. A monthly cron job works we
 | `GET /health` | Health check for uptime monitoring |
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
+| `DELETE /admin/users/<user_id>?token=ADMIN_TOKEN` | Deletes everything stored about one person |
+| `GET /privacy`, `GET /data-deletion` | Public privacy policy and data deletion pages |
+| `POST /data-deletion` | Meta's data deletion callback |
 
 ## Project structure
 
@@ -196,6 +220,7 @@ app/
   bot.py         flow engine (comments, buttons, follow gate, email)
   rules.py       rules.yaml loader, validation, hot reload
   instagram.py   Instagram API client
+  privacy.py     privacy policy, data deletion page + Meta callback
   storage.py     SQLite: state, dedup, emails, stats
   config.py      settings from .env
 rules.yaml       your reels, keywords and flows

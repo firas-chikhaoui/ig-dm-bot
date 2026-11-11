@@ -48,7 +48,16 @@ CREATE TABLE IF NOT EXISTS events (
     detail TEXT,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS deletion_requests (
+    code TEXT PRIMARY KEY,         -- confirmation code shown to the person
+    source TEXT NOT NULL,          -- meta_callback / dm / admin
+    deleted_rows INTEGER NOT NULL,
+    created_at REAL NOT NULL       -- no user id is kept on purpose
+);
 """
+
+# Tables holding data about a person, keyed by their Instagram user id.
+USER_TABLES = ("triggers", "user_state", "emails", "follow_checks", "events")
 
 
 class Storage:
@@ -142,6 +151,27 @@ class Storage:
                 "SELECT * FROM emails WHERE list = ? ORDER BY created_at", (list_name,)
             ).fetchall()
         return self._exec("SELECT * FROM emails ORDER BY created_at").fetchall()
+
+    # --- data deletion ---------------------------------------------------
+    def delete_user_data(self, user_id: str) -> int:
+        """Delete everything stored about one person. Returns the number of rows removed."""
+        total = 0
+        with self._lock:
+            for table in USER_TABLES:
+                cur = self._conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+                total += cur.rowcount
+            self._conn.commit()
+        return total
+
+    def record_deletion(self, code: str, source: str, deleted_rows: int) -> None:
+        self._exec(
+            "INSERT OR REPLACE INTO deletion_requests(code, source, deleted_rows, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (code, source, deleted_rows, time.time()),
+        )
+
+    def get_deletion(self, code: str) -> sqlite3.Row | None:
+        return self._exec("SELECT * FROM deletion_requests WHERE code = ?", (code,)).fetchone()
 
     # --- stats -----------------------------------------------------------
     def log_event(self, user_id: str | None, kind: str, detail: str = "") -> None:

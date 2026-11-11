@@ -212,3 +212,47 @@ def test_invalid_follow_retry_config_rejected():
     with pytest.raises(RulesError):
         parse_rules({"settings": {"follow_max_retries": -2},
                      "flows": {"f": {"steps": {"a": {"message": "hi"}}}}})
+
+
+def test_delete_my_data_by_dm(setup):
+    bot, api = setup
+    bot.handle_webhook(comment("c1", "guide"))
+    bot.handle_webhook(click(make_payload("free_guide", "ask_email"), mid="m1"))
+    bot.handle_webhook(text_msg("sara@example.com", mid="m2"))
+    assert bot.db.list_emails()
+    bot.handle_webhook(text_msg("Delete my data!", mid="m3"))
+    reply = api.sent[-1][1]["text"]
+    assert "deleted" in reply and "{code}" not in reply
+    code = reply.rsplit(" ", 1)[-1]
+    assert bot.db.get_deletion(code)["source"] == "dm"
+    assert not bot.db.list_emails()
+    assert bot.db.get_state("111") is None
+    # other users' data is untouched, and the deletion is counted without a user id
+    rows = bot.db._exec("SELECT user_id FROM events").fetchall()
+    assert all(r["user_id"] != "111" for r in rows)
+
+
+def test_delete_keyword_must_be_exact(setup):
+    bot, api = setup
+    bot.handle_webhook(comment("c1", "guide"))
+    bot.handle_webhook(text_msg("how do I delete my data later?", mid="m1"))
+    assert bot.db.get_state("111") is not None
+
+
+def test_invalid_data_deletion_settings_rejected():
+    with pytest.raises(RulesError):
+        parse_rules({"settings": {"data_deletion": {"keywords": "delete"}},
+                     "flows": {}, "reels": []})
+
+
+def test_storage_delete_user_data_only_touches_that_user():
+    db = Storage(":memory:")
+    for uid in ("a", "b"):
+        db.set_state(uid, "f", None, username=uid)
+        db.save_email(uid, uid, f"{uid}@x.io", "waitlist", "f")
+        db.log_event(uid, "button", "f/s")
+        db.add_follow_failure(uid, "f", "s")
+        db.mark_triggered(uid, "m")
+    assert db.delete_user_data("a") == 5
+    assert db.get_state("a") is None and db.get_state("b") is not None
+    assert [r["user_id"] for r in db.list_emails()] == ["b"]

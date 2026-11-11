@@ -21,6 +21,13 @@ settings:
   # following before the bot stops answering (a step can override this with max_retries).
   follow_max_retries: 3
 
+  # Privacy: when someone DMs one of these phrases (exact, any case), the bot deletes
+  # everything it stored about them and replies with a confirmation code.
+  # Use keywords: [] to turn this off ({code} = confirmation code).
+  data_deletion:
+    keywords: ["delete my data"]
+    reply: "Done ✅ Everything we stored about you has been deleted. Confirmation code: {code}"
+
 # ------------------------------------------------------------
 # Reels / posts to watch.
 #   id:  the media id of the reel (see README: "Find your reel id")

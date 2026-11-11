@@ -85,6 +85,7 @@ def parse_rules(data: dict[str, Any]) -> Rules:
     settings = data.get("settings") or {}
     default_match = settings.get("default_match", "word")
     _check_retries(settings.get("follow_max_retries"), "settings")
+    _check_data_deletion(settings.get("data_deletion"))
 
     flows = data.get("flows") or {}
     if not isinstance(flows, dict):
@@ -185,6 +186,18 @@ def _validate_step(fname: str, sname: str, step: Any, steps: dict) -> None:
         if "prompt" not in ae:
             raise RulesError(f"{where}: ask_email needs 'prompt'")
         check_target(ae.get("next"), "next")
+
+
+def _check_data_deletion(cfg: Any) -> None:
+    if cfg is None:
+        return
+    if not isinstance(cfg, dict):
+        raise RulesError("settings.data_deletion must be a mapping")
+    kws = cfg.get("keywords", [])
+    if not isinstance(kws, list) or not all(isinstance(k, str) for k in kws):
+        raise RulesError("settings.data_deletion.keywords must be a list of strings")
+    if "reply" in cfg and not isinstance(cfg["reply"], str):
+        raise RulesError("settings.data_deletion.reply must be text")
 
 
 def _check_retries(value: Any, where: str) -> None:

@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
@@ -18,6 +19,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .bot import Bot
 from .config import settings
 from .instagram import InstagramAPI
+from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion_page,
+                      delete_user, parse_signed_request, privacy_page)
 from .rules import RulesStore
 from .storage import Storage
 
@@ -83,6 +86,45 @@ async def webhook(request: Request, background: BackgroundTasks):
     return {"ok": True}
 
 
+# --- Privacy policy + data deletion (both URLs go into the Meta app settings) --
+def _delete_keywords() -> list[str]:
+    cfg = rules_store.get().settings.get("data_deletion") or {}
+    return list(cfg.get("keywords", DEFAULT_DELETE_KEYWORDS) or [])
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+    return privacy_page(settings.privacy_operator, settings.privacy_contact,
+                        settings.ig_username, _delete_keywords())
+
+
+@app.get("/data-deletion", response_class=HTMLResponse)
+def data_deletion(code: str | None = None):
+    status = None
+    if code:
+        row = db.get_deletion(code)
+        status = dict(row) if row else None
+    return data_deletion_page(settings.privacy_contact, _delete_keywords(), status, code)
+
+
+@app.post("/data-deletion")
+async def data_deletion_callback(request: Request):
+    """Meta's Data Deletion Request Callback: delete the user and return a status URL."""
+    # Form-encoded body; parsed by hand so we don't need python-multipart.
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    signed_request = (form.get("signed_request") or [""])[0]
+    try:
+        data = parse_signed_request(signed_request, settings.app_secret)
+    except SignedRequestError as e:
+        log.warning("rejected data deletion callback: %s", e)
+        raise HTTPException(status_code=400, detail="invalid signed_request")
+    code, rows = delete_user(db, str(data["user_id"]), "meta_callback")
+    log.info("data deletion callback: user %s, %d rows deleted, code %s",
+             data["user_id"], rows, code)
+    base = settings.public_url or str(request.base_url).rstrip("/")
+    return {"url": f"{base}/data-deletion?code={code}", "confirmation_code": code}
+
+
 # --- Admin ---------------------------------------------------------------
 def _check_admin(token: str) -> None:
     if not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
@@ -107,6 +149,15 @@ def emails_csv(token: str = "", list: str | None = None):  # noqa: A002
                     datetime.fromtimestamp(row["created_at"], timezone.utc).isoformat()])
     return Response(buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=emails.csv"})
+
+
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: str, token: str = ""):
+    """Delete everything stored about one Instagram user (e.g. after an email request)."""
+    _check_admin(token)
+    code, rows = delete_user(db, user_id, "admin")
+    log.info("admin deleted data of user %s (%d rows, code %s)", user_id, rows, code)
+    return {"deleted_rows": rows, "confirmation_code": code}
 
 
 # --- Playground (only in DRY_RUN): see the bot like a follower would --------

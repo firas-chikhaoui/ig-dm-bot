@@ -6,6 +6,8 @@ import re
 from typing import Any
 
 from .instagram import InstagramAPI
+from .privacy import (DEFAULT_DELETE_KEYWORDS, DEFAULT_DELETE_REPLY, delete_user,
+                      matches_delete_keyword)
 from .rules import RulesStore
 from .storage import Storage
 
@@ -141,6 +143,10 @@ class Bot:
         if not text:
             return
 
+        # "delete my data" -> wipe everything we stored about this person
+        if self._handle_delete_request(sender, text):
+            return
+
         # Waiting for an email?
         if state and state["waiting_step"] and state["flow"]:
             if self._handle_awaited_text(sender, state["flow"], state["waiting_step"], text,
@@ -155,6 +161,17 @@ class Bot:
             self.db.reset_follow_failures(sender, trig.flow)
             self.db.log_event(sender, "flow_started", trig.flow)
             self.run_step(sender, trig.flow, rules.flows[trig.flow]["start"], username)
+
+    def _handle_delete_request(self, user_id: str, text: str) -> bool:
+        cfg = self.rules.get().settings.get("data_deletion") or {}
+        keywords = cfg.get("keywords", DEFAULT_DELETE_KEYWORDS) or []
+        if not matches_delete_keyword(text, keywords):
+            return False
+        code, rows = delete_user(self.db, user_id, "dm")
+        log.info("deleted data of user %s on request (%d rows, code %s)", user_id, rows, code)
+        self.db.log_event(None, "data_deleted", "dm")
+        self._send(user_id, cfg.get("reply", DEFAULT_DELETE_REPLY), code=code)
+        return True
 
     def _handle_awaited_text(self, user_id: str, flow: str, step_name: str, text: str,
                              username: str | None) -> bool:
