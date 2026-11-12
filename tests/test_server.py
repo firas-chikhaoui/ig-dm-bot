@@ -90,3 +90,14 @@ def test_admin_delete_user(monkeypatch, tmp_path):
     r = c.delete("/admin/users/777", params={"token": "admin"})
     assert r.status_code == 200 and r.json()["deleted_rows"] == 1
     assert not app.main.db.list_emails()
+
+
+def test_admin_token_status(monkeypatch, tmp_path):
+    monkeypatch.setenv("IG_ACCESS_TOKEN", "secret-ig-token")
+    c = make_client(monkeypatch, tmp_path)
+    assert c.get("/admin/token").status_code == 401
+    r = c.get("/admin/token", params={"token": "admin"})
+    assert r.status_code == 200
+    assert r.json()["source"] == "database" and "secret-ig-token" not in r.text
+    # DRY_RUN never talks to Instagram
+    assert c.post("/admin/token/refresh", params={"token": "admin"}).status_code == 409

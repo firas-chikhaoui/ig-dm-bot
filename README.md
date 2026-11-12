@@ -14,6 +14,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - ✅ **Follow gate**: checks whether the user follows you before sending the link
 - 📧 **Email capture**: validates the email and saves it to a waitlist (export as CSV)
 - 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
+- 🔑 **Automatic token refresh**: the 60-day Instagram token is renewed in the background before it expires
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
 - 🧪 Tests and a `DRY_RUN` mode
@@ -191,15 +192,24 @@ bot.yourdomain.com {
 
 `rules.yaml` and `data/` are mounted as volumes, so you can edit the rules on the server without rebuilding, and your emails survive restarts.
 
-### 5. Token refresh
+### 5. Token refresh (automatic)
 
-Long-lived Instagram tokens expire after 60 days. To get a new one, run:
+Long-lived Instagram tokens expire after 60 days. The bot takes care of this itself:
+
+- On first start it copies `IG_ACCESS_TOKEN` into its database (`data/bot.db`).
+- Every few hours (`TOKEN_CHECK_HOURS`, default 6) it checks the token and refreshes it once fewer than `TOKEN_REFRESH_DAYS_BEFORE` days (default 10) are left. The new token is used right away, no restart needed.
+- Right after setup the expiry is unknown, so the bot tries a refresh straight away. Instagram only allows refreshing tokens that are at least 24 hours old, so a warning like `refresh failed, will retry later` on the first day is normal.
+- If refreshing keeps failing and fewer than 7 days are left, the bot logs an **error** on every check. If the token does expire, generate a new one in the Meta dashboard, put it in `IG_ACCESS_TOKEN` and restart: a new token in `.env` always replaces the stored one.
+
+Check the status (the token itself is never shown) or force a refresh:
 
 ```bash
-python scripts/refresh_token.py
+curl "https://YOUR-DOMAIN/admin/token?token=ADMIN_TOKEN"
+curl -X POST "https://YOUR-DOMAIN/admin/token/refresh?token=ADMIN_TOKEN"
+python scripts/refresh_token.py            # same thing from the command line (--status to only look)
 ```
 
-Then update `.env` and run `docker compose restart`. A monthly cron job works well for this.
+Set `TOKEN_AUTO_REFRESH=false` to turn this off. Nothing is refreshed in `DRY_RUN`.
 
 ## Admin endpoints
 
@@ -208,6 +218,8 @@ Then update `.env` and run `docker compose restart`. A monthly cron job works we
 | `GET /health` | Health check for uptime monitoring |
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
+| `GET /admin/token?token=ADMIN_TOKEN` | Instagram token expiry, last refresh and last error |
+| `POST /admin/token/refresh?token=ADMIN_TOKEN` | Refreshes the Instagram token now |
 | `DELETE /admin/users/<user_id>?token=ADMIN_TOKEN` | Deletes everything stored about one person |
 | `GET /privacy`, `GET /data-deletion` | Public privacy policy and data deletion pages |
 | `POST /data-deletion` | Meta's data deletion callback |
@@ -221,10 +233,11 @@ app/
   rules.py       rules.yaml loader, validation, hot reload
   instagram.py   Instagram API client
   privacy.py     privacy policy, data deletion page + Meta callback
-  storage.py     SQLite: state, dedup, emails, stats
+  tokens.py      stores and auto-refreshes the Instagram access token
+  storage.py     SQLite: state, dedup, emails, stats, token
   config.py      settings from .env
 rules.yaml       your reels, keywords and flows
-scripts/         list_media.py, refresh_token.py
+scripts/         list_media.py, refresh_token.py, simulate.py
 tests/
 ```
 

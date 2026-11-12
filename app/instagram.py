@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -12,8 +12,12 @@ log = logging.getLogger("instagram")
 
 
 class InstagramAPI:
-    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+    def __init__(self, settings: Settings, client: httpx.Client | None = None,
+                 token_provider: Callable[[], str] | None = None):
         self.s = settings
+        # Where the access token comes from (the auto-refreshed one in the DB by default
+        # in main.py); falls back to IG_ACCESS_TOKEN from .env.
+        self.token = token_provider or (lambda: settings.ig_access_token)
         self.base = f"{settings.graph_base}/{settings.graph_version}"
         self.client = client or httpx.Client(timeout=15)
         # DRY_RUN only: everything the bot "sends" is kept here (used by /playground)
@@ -30,7 +34,7 @@ class InstagramAPI:
         r = self.client.post(
             f"{self.base}/{path}",
             json=json,
-            headers={"Authorization": f"Bearer {self.s.ig_access_token}"},
+            headers={"Authorization": f"Bearer {self.token()}"},
         )
         if r.status_code >= 400:
             log.error("POST %s failed %s: %s", path, r.status_code, r.text)
@@ -44,7 +48,7 @@ class InstagramAPI:
         r = self.client.get(
             f"{self.base}/{path}",
             params=params,
-            headers={"Authorization": f"Bearer {self.s.ig_access_token}"},
+            headers={"Authorization": f"Bearer {self.token()}"},
         )
         if r.status_code >= 400:
             log.error("GET %s failed %s: %s", path, r.status_code, r.text)

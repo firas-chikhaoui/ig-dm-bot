@@ -30,6 +30,11 @@ class Settings:
     graph_version: str = os.getenv("GRAPH_VERSION", "v23.0")
     graph_base: str = os.getenv("GRAPH_BASE", "https://graph.instagram.com")
 
+    # Long-lived tokens expire after 60 days; the bot refreshes them on its own.
+    token_auto_refresh: bool = os.getenv("TOKEN_AUTO_REFRESH", "true").lower() in ("1", "true", "yes")
+    token_refresh_days_before: int = int(os.getenv("TOKEN_REFRESH_DAYS_BEFORE", "10"))
+    token_check_hours: float = float(os.getenv("TOKEN_CHECK_HOURS", "6"))
+
     # Public pages (/privacy, /data-deletion) required by Meta
     public_url: str = os.getenv("PUBLIC_URL", "").rstrip("/")  # e.g. https://bot.example.com
     privacy_operator: str = os.getenv("PRIVACY_OPERATOR", "")  # your name or business name

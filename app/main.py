@@ -5,6 +5,8 @@ import csv
 import hashlib
 import hmac
 import io
+import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -23,13 +25,19 @@ from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion
                       delete_user, parse_signed_request, privacy_page)
 from .rules import RulesStore
 from .storage import Storage
+from .tokens import TokenManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
+# httpx logs every request URL at INFO; the token refresh URL contains the access token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 rules_store = RulesStore(settings.rules_path)
 db = Storage(settings.db_path)
-bot = Bot(InstagramAPI(settings), rules_store, db, own_id=settings.ig_user_id)
+tokens = TokenManager(settings, db)
+tokens.seed()
+bot = Bot(InstagramAPI(settings, token_provider=tokens.current), rules_store, db,
+          own_id=settings.ig_user_id)
 
 
 @asynccontextmanager
@@ -39,7 +47,14 @@ async def lifespan(_: FastAPI):
              " [DRY_RUN]" if settings.dry_run else "")
     if not settings.app_secret:
         log.warning("APP_SECRET is empty: webhook signatures are NOT verified")
+    refresher = None
+    if settings.token_auto_refresh and not settings.dry_run and tokens.current():
+        refresher = asyncio.create_task(tokens.run_forever())
     yield
+    if refresher:
+        refresher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await refresher
 
 
 app = FastAPI(title="ig-dm-bot", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -136,6 +151,22 @@ def stats(token: str = ""):
     _check_admin(token)
     r = rules_store.get()
     return {"stats": db.stats(), "reels": len(r.reels), "flows": list(r.flows)}
+
+
+@app.get("/admin/token")
+def token_status(token: str = ""):
+    """Expiry and refresh status of the Instagram token (the token itself is never shown)."""
+    _check_admin(token)
+    return tokens.status()
+
+
+@app.post("/admin/token/refresh")
+def token_refresh(token: str = ""):
+    _check_admin(token)
+    if settings.dry_run:
+        raise HTTPException(status_code=409, detail="not available in DRY_RUN")
+    ok = tokens.refresh()
+    return {"refreshed": ok, **tokens.status()}
 
 
 @app.get("/admin/emails.csv")
