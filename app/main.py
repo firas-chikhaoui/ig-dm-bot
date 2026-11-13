@@ -18,6 +18,7 @@ from urllib.parse import parse_qs
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
+from .alerts import setup_alerts
 from .bot import Bot
 from .config import settings
 from .instagram import InstagramAPI
@@ -31,6 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("main")
 # httpx logs every request URL at INFO; the token refresh URL contains the access token.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+alerts = setup_alerts(settings)  # Telegram alerts on errors, if configured
 
 rules_store = RulesStore(settings.rules_path)
 db = Storage(settings.db_path)
@@ -167,6 +169,20 @@ def token_refresh(token: str = ""):
         raise HTTPException(status_code=409, detail="not available in DRY_RUN")
     ok = tokens.refresh()
     return {"refreshed": ok, **tokens.status()}
+
+
+@app.post("/admin/alerts/test")
+def alerts_test(token: str = ""):
+    """Send a test message to the Telegram chat to check the alert setup."""
+    _check_admin(token)
+    if alerts is None:
+        raise HTTPException(status_code=409,
+                            detail="Telegram alerts are off: set TELEGRAM_BOT_TOKEN and "
+                                   "TELEGRAM_CHAT_ID in .env and restart")
+    ok = alerts.send(f"✅ {alerts.label}: test alert. Errors will show up here.")
+    if not ok:
+        raise HTTPException(status_code=502, detail="Telegram rejected the message, see logs")
+    return {"sent": True}
 
 
 @app.get("/admin/emails.csv")

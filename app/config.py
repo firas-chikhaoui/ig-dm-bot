@@ -41,6 +41,11 @@ class Settings:
     privacy_contact: str = os.getenv("PRIVACY_CONTACT", "")  # email people can write to
     ig_username: str = os.getenv("IG_USERNAME", "")  # shown on the privacy page
 
+    # Optional Telegram alerts on errors (disabled while either value is empty)
+    telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    telegram_alert_cooldown: float = float(os.getenv("TELEGRAM_ALERT_COOLDOWN", "300"))
+
     # App
     rules_path: str = os.getenv("RULES_PATH", "rules.yaml")
     db_path: str = os.getenv("DB_PATH", "data/bot.db")

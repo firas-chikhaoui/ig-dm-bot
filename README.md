@@ -15,6 +15,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 📧 **Email capture**: validates the email and saves it to a waitlist (export as CSV)
 - 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
 - 🔑 **Automatic token refresh**: the 60-day Instagram token is renewed in the background before it expires
+- 🚨 **Error alerts**: failed Instagram API calls are logged clearly, and optionally sent to you on Telegram
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
 - 🧪 Tests and a `DRY_RUN` mode
@@ -211,6 +212,27 @@ python scripts/refresh_token.py            # same thing from the command line (-
 
 Set `TOKEN_AUTO_REFRESH=false` to turn this off. Nothing is refreshed in `DRY_RUN`.
 
+### 6. Error alerts on Telegram (optional)
+
+Every failed Instagram API call is logged as one readable line, with Meta's error code and a hint, for example:
+
+```
+ERROR instagram: Instagram API POST 1784.../messages failed: HTTP 400, code 10/2534022, OAuthException: ... (permission missing or the 24h messaging window is closed) [fbtrace_id AbC...]
+```
+
+To also get these on your phone, let the bot send every **error** to a Telegram chat:
+
+1. In Telegram, talk to **@BotFather**, send `/newbot` and copy the token it gives you.
+2. Send any message to your new bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and copy the number after `"chat":{"id":`.
+3. Put both in `.env` and restart:
+   ```
+   TELEGRAM_BOT_TOKEN=123456:ABC...
+   TELEGRAM_CHAT_ID=123456789
+   ```
+4. Check it works: `curl -X POST "https://YOUR-DOMAIN/admin/alerts/test?token=ADMIN_TOKEN"`
+
+You get an alert for failed API calls, crashes while handling a comment or DM, a broken `rules.yaml` and an Instagram token that is about to expire. The same error is sent at most once every 5 minutes (`TELEGRAM_ALERT_COOLDOWN`, in seconds); the next alert says how many were skipped. Access tokens are removed from alert texts. With either value empty, alerts are off.
+
 ## Admin endpoints
 
 | Endpoint | |
@@ -220,6 +242,7 @@ Set `TOKEN_AUTO_REFRESH=false` to turn this off. Nothing is refreshed in `DRY_RU
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
 | `GET /admin/token?token=ADMIN_TOKEN` | Instagram token expiry, last refresh and last error |
 | `POST /admin/token/refresh?token=ADMIN_TOKEN` | Refreshes the Instagram token now |
+| `POST /admin/alerts/test?token=ADMIN_TOKEN` | Sends a test message to your Telegram alert chat |
 | `DELETE /admin/users/<user_id>?token=ADMIN_TOKEN` | Deletes everything stored about one person |
 | `GET /privacy`, `GET /data-deletion` | Public privacy policy and data deletion pages |
 | `POST /data-deletion` | Meta's data deletion callback |
@@ -234,6 +257,7 @@ app/
   instagram.py   Instagram API client
   privacy.py     privacy policy, data deletion page + Meta callback
   tokens.py      stores and auto-refreshes the Instagram access token
+  alerts.py      optional Telegram alerts for errors
   storage.py     SQLite: state, dedup, emails, stats, token
   config.py      settings from .env
 rules.yaml       your reels, keywords and flows
