@@ -155,6 +155,26 @@ def stats(token: str = ""):
     return {"stats": db.stats(), "reels": len(r.reels), "flows": list(r.flows)}
 
 
+@app.get("/admin/activity")
+def activity(token: str = "", days: int = Query(14, ge=1, le=90)):
+    """Events per day and the most started flows, for the dashboard chart."""
+    _check_admin(token)
+    return {"days": db.daily_activity(days), "top_flows": db.top_flows()}
+
+
+ADMIN_HTML = Path(__file__).with_name("admin.html")
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page():
+    """Dashboard page. It asks for the admin token in the browser; no data without it."""
+    if not settings.admin_token:
+        raise HTTPException(status_code=404, detail="set ADMIN_TOKEN in .env to use the dashboard")
+    return HTMLResponse(ADMIN_HTML.read_text(encoding="utf-8"),
+                        headers={"X-Frame-Options": "DENY", "Cache-Control": "no-store",
+                                 "Referrer-Policy": "no-referrer"})
+
+
 @app.get("/admin/token")
 def token_status(token: str = ""):
     """Expiry and refresh status of the Instagram token (the token itself is never shown)."""

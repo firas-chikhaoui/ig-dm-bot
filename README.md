@@ -276,12 +276,25 @@ To also get these on your phone, let the bot send every **error** to a Telegram 
 
 You get an alert for failed API calls, crashes while handling a comment or DM, a broken `rules.yaml` and an Instagram token that is about to expire. The same error is sent at most once every 5 minutes (`TELEGRAM_ALERT_COOLDOWN`, in seconds); the next alert says how many were skipped. Access tokens are removed from alert texts. With either value empty, alerts are off.
 
+## Dashboard
+
+Open `https://YOUR-DOMAIN/admin` and enter your `ADMIN_TOKEN`. The dashboard shows:
+
+- 📊 totals: flows started, comment replies, button clicks, emails, follow checks
+- 📈 flows started per day for the last 14 days, and your most used flows
+- 🔑 Instagram token health (days left, last refresh, last error)
+- buttons to download the email list as CSV, refresh the token and send a test alert
+
+The token is kept only in that browser tab (session storage) and the page cannot be embedded in other sites. Without `ADMIN_TOKEN` in `.env` the dashboard is turned off.
+
 ## Admin endpoints
 
 | Endpoint | |
 |---|---|
 | `GET /health` | Health check for uptime monitoring |
+| `GET /admin` | Dashboard page (asks for the admin token) |
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
+| `GET /admin/activity?token=ADMIN_TOKEN&days=14` | Events per day and the most started flows |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
 | `GET /admin/token?token=ADMIN_TOKEN` | Instagram token expiry, last refresh and last error |
 | `POST /admin/token/refresh?token=ADMIN_TOKEN` | Refreshes the Instagram token now |
@@ -295,6 +308,7 @@ You get an alert for failed API calls, crashes while handling a comment or DM, a
 ```
 app/
   main.py        web server: webhook + admin endpoints
+  admin.html     admin dashboard (stats, token health, CSV export)
   bot.py         flow engine (comments, buttons, follow gate, email)
   rules.py       rules.yaml loader, validation, hot reload
   instagram.py   Instagram API client
@@ -312,7 +326,8 @@ tests/
 
 ## Roadmap
 
-- [ ] Web dashboard (frontend) to edit rules and see stats
+- [x] Web dashboard to see stats, token health and export emails
+- [ ] Edit rules from the dashboard
 - [ ] Multiple Instagram accounts
 - [ ] Send waitlist emails to a newsletter tool (Mailchimp, Brevo, etc.)
 

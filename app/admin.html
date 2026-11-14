@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>ig-dm-bot · dashboard</title>
+<style>
+  :root { --bg:#0b0b0f; --panel:#15151c; --line:#26262f; --text:#f2f2f5; --muted:#8b8b99;
+          --accent:#ff3d7f; --ok:#2ecc71; --warn:#f5a623; --bad:#ff4d4f; --bar:#3b5bfd; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { padding:18px 28px; border-bottom:1px solid var(--line); display:flex; gap:16px;
+           align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; flex:1; }
+  header h1 span { color:var(--muted); font-weight:400; }
+  button, .btn { background:none; border:1px solid var(--line); color:var(--text); border-radius:8px;
+           padding:7px 12px; cursor:pointer; font:inherit; font-size:13px; text-decoration:none; }
+  button.primary { background:var(--accent); border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  input { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px;
+          padding:9px 12px; font:inherit; width:100%; }
+  main { max-width:1080px; margin:0 auto; padding:28px 20px 60px; }
+  .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
+  .kpi .v { font-size:28px; font-weight:650; margin-top:4px; }
+  .kpi .l { color:var(--muted); font-size:13px; }
+  h2 { font-size:14px; color:var(--muted); font-weight:500; margin:28px 0 10px;
+       text-transform:uppercase; letter-spacing:.06em; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; } .row > div { flex:1; min-width:280px; }
+  .chart { display:flex; align-items:flex-end; gap:6px; height:160px; padding-top:10px; }
+  .chart .col { flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%;
+                justify-content:flex-end; }
+  .chart .b { width:100%; max-width:34px; background:var(--bar); border-radius:5px 5px 2px 2px;
+              min-height:2px; }
+  .chart .d { color:var(--muted); font-size:11px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  td, th { text-align:left; padding:7px 4px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:8px; }
+  .muted { color:var(--muted); font-size:13px; }
+  #login { max-width:380px; margin:12vh auto; }
+  #login p { color:var(--muted); font-size:14px; }
+  #msg { margin-left:8px; font-size:13px; color:var(--muted); }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📩 ig-dm-bot <span>· dashboard</span></h1>
+  <span id="updated" class="muted"></span>
+  <button id="reload" class="hidden">↻ Refresh</button>
+  <button id="logout" class="hidden">Log out</button>
+</header>
+
+<div id="login" class="card">
+  <h3 style="margin-top:0">Sign in</h3>
+  <p>Enter the <code>ADMIN_TOKEN</code> from your <code>.env</code>. It stays in this browser tab only.</p>
+  <form id="loginForm"><input id="tokenInput" type="password" autocomplete="current-password"
+    placeholder="Admin token" autofocus>
+  <div style="margin-top:12px"><button class="primary" type="submit">Open dashboard</button>
+  <span id="loginErr" class="muted" style="color:var(--bad)"></span></div></form>
+</div>
+
+<main id="app" class="hidden">
+  <div class="grid" id="kpis"></div>
+
+  <h2>Activity · last 14 days</h2>
+  <div class="card"><div class="chart" id="chart"></div>
+    <div class="muted" style="margin-top:8px">Flows started per day</div></div>
+
+  <div class="row">
+    <div>
+      <h2>Top flows</h2>
+      <div class="card"><table id="flows"><tr><th>Flow</th><th>Started</th></tr></table></div>
+    </div>
+    <div>
+      <h2>Instagram token</h2>
+      <div class="card" id="token"></div>
+    </div>
+  </div>
+
+  <h2>Actions</h2>
+  <div class="card">
+    <button id="csv">⬇ Download emails (CSV)</button>
+    <button id="refreshToken">🔑 Refresh token now</button>
+    <button id="testAlert">🚨 Send test alert</button>
+    <span id="msg"></span>
+  </div>
+</main>
+
+<script>
+const KEY = "igdm_admin_token";
+let token = "";
+try { token = sessionStorage.getItem(KEY) || ""; } catch (e) {}
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, opts = {}) {
+  const sep = path.includes("?") ? "&" : "?";
+  const r = await fetch(`${path}${sep}token=${encodeURIComponent(token)}`, opts);
+  if (r.status === 401) { logout("Wrong token"); throw new Error("unauthorized"); }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+  return body;
+}
+
+function show(loggedIn) {
+  $("login").classList.toggle("hidden", loggedIn);
+  $("app").classList.toggle("hidden", !loggedIn);
+  $("reload").classList.toggle("hidden", !loggedIn);
+  $("logout").classList.toggle("hidden", !loggedIn);
+}
+
+function logout(err) {
+  token = "";
+  try { sessionStorage.removeItem(KEY); } catch (e) {}
+  $("loginErr").textContent = err || "";
+  show(false);
+}
+
+const KPIS = [
+  ["flow_started", "Flows started"], ["comment_reply", "Comment replies"],
+  ["button", "Button clicks"], ["emails", "Emails collected"],
+  ["follow_check", "Follow checks"], ["follow_gave_up", "Gave up (no follow)"],
+];
+
+function renderStats(s) {
+  $("kpis").innerHTML = KPIS.map(([k, l]) =>
+    `<div class="card kpi"><div class="l">${l}</div><div class="v">${(s.stats[k] || 0).toLocaleString()}</div></div>`
+  ).join("") + `<div class="card kpi"><div class="l">Reel rules · flows</div>
+    <div class="v">${s.reels} · ${s.flows.length}</div></div>`;
+}
+
+function renderActivity(a) {
+  const vals = a.days.map(d => d.counts.flow_started || 0);
+  const max = Math.max(1, ...vals);
+  $("chart").innerHTML = a.days.map((d, i) =>
+    `<div class="col" title="${esc(d.date)}: ${vals[i]} flow(s) started">
+       <div class="muted" style="font-size:11px">${vals[i] || ""}</div>
+       <div class="b" style="height:${(vals[i] / max) * 100}%"></div>
+       <div class="d">${esc(d.date.slice(8))}.${esc(d.date.slice(5, 7))}</div></div>`).join("");
+  const rows = a.top_flows.map(f =>
+    `<tr><td>${esc(f.flow)}</td><td>${f.started.toLocaleString()}</td></tr>`).join("");
+  $("flows").innerHTML = `<tr><th>Flow</th><th>Started</th></tr>` +
+    (rows || `<tr><td colspan="2" class="muted">No flows started yet</td></tr>`);
+}
+
+function renderToken(t) {
+  let color = "var(--ok)", label = "Healthy";
+  if (!t.configured) { color = "var(--bad)"; label = "Not configured"; }
+  else if (t.last_error) { color = "var(--bad)"; label = "Refresh failed"; }
+  else if (t.days_left !== null && t.days_left < 10) { color = "var(--warn)"; label = "Expires soon"; }
+  $("token").innerHTML = `<div><span class="dot" style="background:${color}"></span><b>${label}</b></div>
+    <table style="margin-top:8px">
+      <tr><td class="muted">Days left</td><td>${t.days_left ?? "unknown"}</td></tr>
+      <tr><td class="muted">Expires</td><td>${esc(t.expires_at ?? "unknown")}</td></tr>
+      <tr><td class="muted">Last refresh</td><td>${esc(t.refreshed_at ?? "never")}</td></tr>
+      <tr><td class="muted">Auto refresh</td><td>${t.auto_refresh ? "on" : "off"}</td></tr>
+      ${t.last_error ? `<tr><td class="muted">Last error</td><td>${esc(t.last_error)}</td></tr>` : ""}
+    </table>`;
+}
+
+async function load() {
+  try {
+    const [s, a, t] = await Promise.all([api("/admin/stats"), api("/admin/activity"), api("/admin/token")]);
+    show(true);
+    renderStats(s); renderActivity(a); renderToken(t);
+    $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    if (e.message !== "unauthorized") $("updated").textContent = "⚠ " + e.message;
+  }
+}
+
+async function action(btn, fn) {
+  btn.disabled = true; $("msg").textContent = "…";
+  try { $("msg").textContent = await fn(); } catch (e) { $("msg").textContent = "⚠ " + e.message; }
+  btn.disabled = false;
+}
+
+$("loginForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  token = $("tokenInput").value.trim();
+  if (!token) return;
+  try { sessionStorage.setItem(KEY, token); } catch (err) {}
+  $("tokenInput").value = "";
+  load();
+});
+$("logout").onclick = () => logout();
+$("reload").onclick = load;
+$("csv").onclick = async () => {
+  const r = await fetch(`/admin/emails.csv?token=${encodeURIComponent(token)}`);
+  if (!r.ok) { $("msg").textContent = "⚠ download failed"; return; }
+  const url = URL.createObjectURL(await r.blob());
+  const a = Object.assign(document.createElement("a"), { href: url, download: "emails.csv" });
+  a.click(); URL.revokeObjectURL(url);
+};
+$("refreshToken").onclick = (e) => action(e.target, async () => {
+  const r = await api("/admin/token/refresh", { method: "POST" });
+  renderToken(r);
+  return r.refreshed ? "✅ Token refreshed" : "⚠ Refresh failed, see logs";
+});
+$("testAlert").onclick = (e) => action(e.target, async () => {
+  await api("/admin/alerts/test", { method: "POST" });
+  return "✅ Test alert sent to Telegram";
+});
+
+if (token) load(); else show(false);
+setInterval(() => { if (token && !document.hidden) load(); }, 60000);
+</script>
+</body>
+</html>

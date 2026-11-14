@@ -101,3 +101,33 @@ def test_admin_token_status(monkeypatch, tmp_path):
     assert r.json()["source"] == "database" and "secret-ig-token" not in r.text
     # DRY_RUN never talks to Instagram
     assert c.post("/admin/token/refresh", params={"token": "admin"}).status_code == 409
+
+
+def test_admin_dashboard_and_activity(monkeypatch, tmp_path):
+    c = make_client(monkeypatch, tmp_path)
+    page = c.get("/admin")
+    assert page.status_code == 200 and "ig-dm-bot" in page.text
+    assert page.headers["x-frame-options"] == "DENY"
+
+    assert c.get("/admin/activity").status_code == 401
+    import app.main
+    db = app.main.db
+    db.log_event("u1", "flow_started", "free_guide")
+    db.log_event("u2", "flow_started", "free_guide")
+    db.log_event("u3", "flow_started", "waitlist")
+    r = c.get("/admin/activity", params={"token": "admin", "days": 7}).json()
+    assert len(r["days"]) == 7
+    assert r["days"][-1]["counts"]["flow_started"] == 3
+    assert r["top_flows"][0] == {"flow": "free_guide", "started": 2}
+    assert c.get("/admin/activity", params={"token": "admin", "days": 0}).status_code == 422
+
+
+def test_admin_dashboard_off_without_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "")
+    import app.config
+    import app.main
+    import importlib
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "bot.db"))
+    importlib.reload(app.config)
+    importlib.reload(app.main)
+    assert TestClient(app.main.app).get("/admin").status_code == 404

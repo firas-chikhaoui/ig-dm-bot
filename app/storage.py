@@ -219,3 +219,28 @@ class Storage:
         out = {r["kind"]: r["n"] for r in rows}
         out["emails"] = self._exec("SELECT COUNT(*) FROM emails").fetchone()[0]
         return out
+
+    def daily_activity(self, days: int = 14, now: float | None = None) -> list[dict]:
+        """Events per UTC day for the last `days` days, oldest first (missing days = 0)."""
+        days = max(1, min(int(days), 90))
+        now = time.time() if now is None else now
+        today = int(now // 86400)
+        first = today - days + 1
+        rows = self._exec(
+            "SELECT CAST(created_at / 86400 AS INTEGER) AS day, kind, COUNT(*) AS n "
+            "FROM events WHERE created_at >= ? GROUP BY day, kind",
+            (first * 86400,),
+        ).fetchall()
+        by_day: dict[int, dict[str, int]] = {d: {} for d in range(first, today + 1)}
+        for r in rows:
+            if r["day"] in by_day:
+                by_day[r["day"]][r["kind"]] = r["n"]
+        return [{"date": time.strftime("%Y-%m-%d", time.gmtime(d * 86400)), "counts": c}
+                for d, c in by_day.items()]
+
+    def top_flows(self, limit: int = 10) -> list[dict]:
+        """How often each flow was started, most popular first."""
+        rows = self._exec(
+            "SELECT detail AS flow, COUNT(*) AS n FROM events WHERE kind = 'flow_started' "
+            "GROUP BY detail ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
+        return [{"flow": r["flow"], "started": r["n"]} for r in rows]
