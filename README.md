@@ -18,6 +18,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 🚨 **Error alerts**: failed Instagram API calls are logged clearly, and optionally sent to you on Telegram
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
+- 🌐 **One-command production deploy**: Docker Compose + Caddy with automatic HTTPS
 - 🧪 Tests and a `DRY_RUN` mode
 
 ## How it works
@@ -172,26 +173,68 @@ In the Meta dashboard (Instagram → Webhooks):
 
 > If the bot only reacts to comments from your own or test accounts, the app is still in **Development mode**. To make it work for everyone, switch the app to **Live**. This may require App Review for advanced access to the permissions above.
 
-### 4. Deploy to the cloud (~€4/month)
+### 4. Deploy to production (~€4/month)
 
-Any small VPS works (Hetzner, Contabo, OVH, etc.):
+The repo ships a ready-to-use setup: `docker-compose.yml` runs the bot, and a **Caddy** service (`Caddyfile`) puts HTTPS in front of it with a free Let's Encrypt certificate that renews itself. You need a small Linux server and a domain or subdomain.
+
+**1. Server.** Any small VPS with Ubuntu or Debian works (Hetzner CX22, Contabo, OVH, etc.; 1 vCPU / 1–2 GB RAM is plenty). Install Docker:
+
+```bash
+curl -fsSL https://get.docker.com | sh
+```
+
+**2. Domain.** At your DNS provider, create an **A record** (and an AAAA record if the server has IPv6) for e.g. `bot.yourdomain.com` pointing at the server's IP. Wait until `ping bot.yourdomain.com` shows that IP.
+
+**3. Firewall.** Open SSH, HTTP and HTTPS only. Port 80 is needed so Caddy can get the certificate; the bot's own port 8000 stays private (it is bound to `127.0.0.1`).
+
+```bash
+ufw allow OpenSSH && ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 443/udp && ufw enable
+```
+
+**4. Install and configure.**
 
 ```bash
 git clone https://github.com/<you>/ig-dm-bot.git && cd ig-dm-bot
 cp .env.example .env && nano .env
-docker compose up -d --build
-docker compose logs -f
 ```
 
-Put HTTPS in front of it. Caddy is the easiest option; an example `Caddyfile`:
+Fill in the Instagram values and set `DOMAIN=bot.yourdomain.com`, `PUBLIC_URL=https://bot.yourdomain.com`, `DRY_RUN=false`, and long random strings for `VERIFY_TOKEN` and `ADMIN_TOKEN` (`openssl rand -hex 24` makes one).
 
-```
-bot.yourdomain.com {
-    reverse_proxy localhost:8000
-}
+**5. Start.**
+
+```bash
+docker compose --profile https up -d --build
+docker compose --profile https logs -f          # Ctrl+C to stop watching
 ```
 
-`rules.yaml` and `data/` are mounted as volumes, so you can edit the rules on the server without rebuilding, and your emails survive restarts.
+Within a minute Caddy logs `certificate obtained successfully`. Check it:
+
+```bash
+curl https://bot.yourdomain.com/health          # {"ok":true}
+```
+
+**6. Point Meta at it.** Use `https://bot.yourdomain.com/webhook` as the webhook callback URL (step 3 above), and the `/privacy` and `/data-deletion` URLs in *App settings → Basic*.
+
+**Everyday commands**
+
+| What | Command |
+|---|---|
+| Update to the latest version | `git pull && docker compose --profile https up -d --build` |
+| Edit the rules | `nano rules.yaml` (reloaded automatically, no restart) |
+| Restart after changing `.env` | `docker compose --profile https up -d` |
+| See the logs | `docker compose --profile https logs -f bot` |
+| Status | `docker compose --profile https ps` (the bot shows `healthy`) |
+| Back up emails and state | `tar czf backup-$(date +%F).tgz data/ rules.yaml .env` |
+
+Everything the bot stores lives in `data/bot.db` (SQLite), so a copy of `data/` is a full backup; keep it somewhere safe because it contains the email list and the access token. Certificates live in the `caddy_data` Docker volume; don't delete it, or Caddy has to request new ones (Let's Encrypt limits how often).
+
+**Troubleshooting**
+
+- *Caddy can't get a certificate:* the DNS record doesn't point at the server yet, or ports 80/443 are blocked (also check your hosting provider's firewall).
+- *`502 Bad Gateway`:* the bot container isn't running; look at `docker compose logs bot`, usually a typo in `.env` or `rules.yaml`.
+- *Already running another web server (nginx, Apache) on 80/443:* skip `--profile https` and proxy your existing server to `http://127.0.0.1:8000` instead, forwarding the `X-Forwarded-*` headers.
+
+Without `--profile https` (for example on your own computer) only the bot starts, on `http://localhost:8000`.
 
 ### 5. Token refresh (automatic)
 
@@ -261,6 +304,8 @@ app/
   storage.py     SQLite: state, dedup, emails, stats, token
   config.py      settings from .env
 rules.yaml       your reels, keywords and flows
+Caddyfile        HTTPS reverse proxy for production (docker compose --profile https)
+docker-compose.yml
 scripts/         list_media.py, refresh_token.py, simulate.py
 tests/
 ```

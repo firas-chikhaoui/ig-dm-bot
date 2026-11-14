@@ -4,7 +4,38 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "8000:8000"
+      # Only reachable from this machine. On a server, the public traffic goes
+      # through Caddy (HTTPS) below; locally you still open http://localhost:8000
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./rules.yaml:/app/rules.yaml   # edit rules without rebuilding
       - ./data:/app/data               # keeps emails + state between restarts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # HTTPS reverse proxy for production. Start with:
+  #   docker compose --profile https up -d --build
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on:
+      - bot
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # certificates (keep this volume!)
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

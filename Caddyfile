@@ -1,0 +1,22 @@
+# HTTPS in front of the bot. Caddy gets and renews a free Let's Encrypt certificate
+# for $DOMAIN automatically (the domain's DNS must point at this server, ports 80/443 open).
+# Used by:  docker compose --profile https up -d
+{$DOMAIN:localhost} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Meta sends webhooks to /webhook; everything is served by the bot container.
+	reverse_proxy bot:8000
+
+	log {
+		output stdout
+		format console
+	}
+}
