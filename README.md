@@ -20,6 +20,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
 - 🌐 **One-command production deploy**: Docker Compose + Caddy with automatic HTTPS
 - 🧪 Tests and a `DRY_RUN` mode
+- 📝 **Meta App Review guide** with ready-to-paste permission texts and a screencast script ([docs/app-review.md](docs/app-review.md))
 
 ## How it works
 
@@ -173,6 +174,8 @@ In the Meta dashboard (Instagram → Webhooks):
 
 > If the bot only reacts to comments from your own or test accounts, the app is still in **Development mode**. To make it work for everyone, switch the app to **Live**. This may require App Review for advanced access to the permissions above.
 
+> Running the bot only on your own account works with Standard Access, no App Review needed. To serve accounts you don't own, you need Advanced Access: **[docs/app-review.md](docs/app-review.md)** has the checklist, the permission texts to paste and a screencast script.
+
 ### 4. Deploy to production (~€4/month)
 
 The repo ships a ready-to-use setup: `docker-compose.yml` runs the bot, and a **Caddy** service (`Caddyfile`) puts HTTPS in front of it with a free Let's Encrypt certificate that renews itself. You need a small Linux server and a domain or subdomain.
@@ -321,6 +324,7 @@ rules.yaml       your reels, keywords and flows
 Caddyfile        HTTPS reverse proxy for production (docker compose --profile https)
 docker-compose.yml
 scripts/         list_media.py, refresh_token.py, simulate.py
+docs/            app-review.md (Meta App Review: permission texts, screencast script)
 tests/
 ```
 
