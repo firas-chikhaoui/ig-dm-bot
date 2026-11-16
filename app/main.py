@@ -50,7 +50,8 @@ async def lifespan(_: FastAPI):
     if not settings.app_secret:
         log.warning("APP_SECRET is empty: webhook signatures are NOT verified")
     refresher = None
-    if settings.token_auto_refresh and not settings.dry_run and tokens.current():
+    if settings.token_auto_refresh and not settings.dry_run and (
+            tokens.current() or db.list_accounts(active_only=True)):
         refresher = asyncio.create_task(tokens.run_forever())
     yield
     if refresher:
@@ -88,6 +89,11 @@ def _valid_signature(raw: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
 
 
+def _account_paused() -> bool:
+    row = db.get_account(tokens.account_id)
+    return row is not None and not row["active"]
+
+
 # --- Webhook events (comments, messages, button clicks)
 @app.post("/webhook")
 async def webhook(request: Request, background: BackgroundTasks):
@@ -98,6 +104,9 @@ async def webhook(request: Request, background: BackgroundTasks):
         body = json.loads(raw or b"{}")
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="invalid json")
+    if _account_paused():
+        log.info("account %s is paused, ignoring webhook event", tokens.account_id)
+        return {"ok": True, "paused": True}
     # Answer Meta fast (they retry on slow responses); do the work in the background.
     background.add_task(bot.handle_webhook, body)
     return {"ok": True}
@@ -175,20 +184,41 @@ def admin_page():
                                  "Referrer-Policy": "no-referrer"})
 
 
+def _token_manager(account: str | None) -> TokenManager:
+    """The .env account by default, or any account stored in the database."""
+    if not account or account == tokens.account_id:
+        return tokens
+    if db.get_account(account) is None:
+        raise HTTPException(status_code=404, detail="unknown account")
+    return tokens.for_account(account)
+
+
 @app.get("/admin/token")
-def token_status(token: str = ""):
-    """Expiry and refresh status of the Instagram token (the token itself is never shown)."""
+def token_status(token: str = "", account: str | None = None):
+    """Expiry and refresh status of an Instagram token (the token itself is never shown)."""
     _check_admin(token)
-    return tokens.status()
+    return _token_manager(account).status()
 
 
 @app.post("/admin/token/refresh")
-def token_refresh(token: str = ""):
+def token_refresh(token: str = "", account: str | None = None):
     _check_admin(token)
+    tm = _token_manager(account)
     if settings.dry_run:
         raise HTTPException(status_code=409, detail="not available in DRY_RUN")
-    ok = tokens.refresh()
-    return {"refreshed": ok, **tokens.status()}
+    ok = tm.refresh()
+    return {"refreshed": ok, **tm.status()}
+
+
+@app.get("/admin/accounts")
+def accounts(token: str = ""):
+    """All connected Instagram accounts with token health (tokens are never shown)."""
+    _check_admin(token)
+    ids = [r["ig_user_id"] for r in db.list_accounts()]
+    if tokens.account_id not in ids and tokens.current():
+        ids.insert(0, tokens.account_id)  # .env token not stored yet
+    return {"accounts": [tokens.for_account(i).status() for i in ids],
+            "default": tokens.account_id}
 
 
 @app.post("/admin/alerts/test")

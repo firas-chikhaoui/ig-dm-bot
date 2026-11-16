@@ -15,6 +15,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 📧 **Email capture**: validates the email and saves it to a waitlist (export as CSV)
 - 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
 - 🔑 **Automatic token refresh**: the 60-day Instagram token is renewed in the background before it expires
+- 👥 **Accounts table**: Instagram accounts and their tokens live in the database (seeded from `.env`), with pause/resume
 - 🚨 **Error alerts**: failed Instagram API calls are logged clearly, and optionally sent to you on Telegram
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
@@ -243,7 +244,7 @@ Without `--profile https` (for example on your own computer) only the bot starts
 
 Long-lived Instagram tokens expire after 60 days. The bot takes care of this itself:
 
-- On first start it copies `IG_ACCESS_TOKEN` into its database (`data/bot.db`).
+- On first start it copies `IG_ACCESS_TOKEN` into its database (`data/bot.db`) as the account `IG_USER_ID` (see [Accounts](#accounts)).
 - Every few hours (`TOKEN_CHECK_HOURS`, default 6) it checks the token and refreshes it once fewer than `TOKEN_REFRESH_DAYS_BEFORE` days (default 10) are left. The new token is used right away, no restart needed.
 - Right after setup the expiry is unknown, so the bot tries a refresh straight away. Instagram only allows refreshing tokens that are at least 24 hours old, so a warning like `refresh failed, will retry later` on the first day is normal.
 - If refreshing keeps failing and fewer than 7 days are left, the bot logs an **error** on every check. If the token does expire, generate a new one in the Meta dashboard, put it in `IG_ACCESS_TOKEN` and restart: a new token in `.env` always replaces the stored one.
@@ -257,6 +258,21 @@ python scripts/refresh_token.py            # same thing from the command line (-
 ```
 
 Set `TOKEN_AUTO_REFRESH=false` to turn this off. Nothing is refreshed in `DRY_RUN`.
+
+#### Accounts
+
+Every Instagram account the bot knows is a row in the `accounts` table (account id, username, token, expiry, active). The account from `IG_USER_ID` / `IG_ACCESS_TOKEN` in `.env` is added on start, so a normal single-account setup needs nothing extra; `.env` only *seeds* the token and stays the fallback while nothing is stored. Databases from older versions are moved over automatically. All active accounts get their tokens refreshed, paused ones are skipped. Manage them from the server:
+
+```bash
+python scripts/accounts.py list                          # accounts + token health
+python scripts/accounts.py add 1784xxxx --username shop  # asks for the token (kept out of shell history)
+python scripts/accounts.py pause 1784xxxx                # stop answering webhooks and refreshing
+python scripts/accounts.py resume 1784xxxx
+python scripts/accounts.py remove 1784xxxx
+python scripts/refresh_token.py --account 1784xxxx       # refresh one stored account now
+```
+
+With Docker, prefix the commands with `docker compose exec bot`. While the `.env` account is paused, the bot ignores incoming webhook events.
 
 ### 6. Error alerts on Telegram (optional)
 
@@ -299,8 +315,9 @@ The token is kept only in that browser tab (session storage) and the page cannot
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
 | `GET /admin/activity?token=ADMIN_TOKEN&days=14` | Events per day and the most started flows |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
-| `GET /admin/token?token=ADMIN_TOKEN` | Instagram token expiry, last refresh and last error |
-| `POST /admin/token/refresh?token=ADMIN_TOKEN` | Refreshes the Instagram token now |
+| `GET /admin/accounts?token=ADMIN_TOKEN` | Stored Instagram accounts with token health |
+| `GET /admin/token?token=ADMIN_TOKEN&account=ID` | Token expiry, last refresh and last error (`account` optional, default: the `.env` account) |
+| `POST /admin/token/refresh?token=ADMIN_TOKEN&account=ID` | Refreshes a token now |
 | `POST /admin/alerts/test?token=ADMIN_TOKEN` | Sends a test message to your Telegram alert chat |
 | `DELETE /admin/users/<user_id>?token=ADMIN_TOKEN` | Deletes everything stored about one person |
 | `GET /privacy`, `GET /data-deletion` | Public privacy policy and data deletion pages |
@@ -316,14 +333,15 @@ app/
   rules.py       rules.yaml loader, validation, hot reload
   instagram.py   Instagram API client
   privacy.py     privacy policy, data deletion page + Meta callback
-  tokens.py      stores and auto-refreshes the Instagram access token
+  tokens.py      auto-refreshes the access token of every account
+  accounts_cli.py  scripts/accounts.py: list/add/pause/resume/remove accounts
   alerts.py      optional Telegram alerts for errors
-  storage.py     SQLite: state, dedup, emails, stats, token
+  storage.py     SQLite: state, dedup, emails, stats, accounts
   config.py      settings from .env
 rules.yaml       your reels, keywords and flows
 Caddyfile        HTTPS reverse proxy for production (docker compose --profile https)
 docker-compose.yml
-scripts/         list_media.py, refresh_token.py, simulate.py
+scripts/         accounts.py, list_media.py, refresh_token.py, simulate.py
 docs/            app-review.md (Meta App Review: permission texts, screencast script)
 tests/
 ```

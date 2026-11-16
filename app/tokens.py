@@ -1,12 +1,13 @@
-"""Keeps the long-lived Instagram access token alive.
+"""Keeps the long-lived Instagram access tokens alive.
 
-Long-lived Instagram tokens are valid for 60 days and can be refreshed (for another
-60 days) once they are at least 24 hours old. The token from IG_ACCESS_TOKEN is copied
-into the database on first start; from then on the bot refreshes it in the background
-before it expires and uses the stored token for every API call.
+Every connected Instagram account is a row in the `accounts` table with its own token
+and expiry. Long-lived Instagram tokens are valid for 60 days and can be refreshed (for
+another 60 days) once they are at least 24 hours old; the bot does that in the background
+before they expire and always uses the stored token for API calls.
 
-If you put a *different* token into .env later (e.g. after generating a new one in the
-Meta dashboard), it replaces the stored one on the next start.
+IG_ACCESS_TOKEN / IG_USER_ID from .env seed the first account on start. If you put a
+*different* token into .env later (e.g. after generating a new one in the Meta
+dashboard), it replaces the stored one for that account on the next start.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from .storage import Storage
 log = logging.getLogger("tokens")
 
 DAY = 86400
+DEFAULT_ACCOUNT = "default"  # account key used when IG_USER_ID is not set
 WARN_DAYS = 7  # log loudly when a token this close to expiry could not be refreshed
 
 
@@ -36,44 +38,91 @@ def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
 
 
+def env_account_id(settings: Settings) -> str:
+    """Key of the account configured in .env (IG_USER_ID)."""
+    return settings.ig_user_id or DEFAULT_ACCOUNT
+
+
 class TokenManager:
-    NAME = "instagram"
+    """Token of one account. `for_account()` gives the manager of another account and
+    `check_all()` keeps every active account's token fresh."""
 
     def __init__(self, settings: Settings, db: Storage, client: httpx.Client | None = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, account_id: str | None = None):
         self.s = settings
         self.db = db
         self.client = client or httpx.Client(timeout=15)
         self.clock = clock
+        self.account_id = account_id or env_account_id(settings)
+
+    def for_account(self, account_id: str) -> "TokenManager":
+        return TokenManager(self.s, self.db, self.client, self.clock, account_id)
+
+    @property
+    def is_env_account(self) -> bool:
+        return self.account_id == env_account_id(self.s)
+
+    def _row(self):
+        return self.db.get_account(self.account_id)
+
+    @property
+    def _label(self) -> str:
+        row = self._row()
+        name = row["username"] if row and row["username"] else None
+        return f"Instagram token of @{name}" if name else \
+            f"Instagram token of account {self.account_id}"
 
     # --- reading ---------------------------------------------------------
     def seed(self) -> None:
-        """Copy IG_ACCESS_TOKEN into the DB (first start, or when .env has a new token)."""
+        """Create the .env account in the DB: on first start, when .env has a new token,
+        and when upgrading from the single-token table of older versions."""
+        if not self.is_env_account:
+            return
+        if self._row() is None:
+            legacy = self.db.pop_legacy_token()
+            if legacy is not None:
+                self.db.save_account(self.account_id, legacy["access_token"],
+                                     expires_at=legacy["expires_at"],
+                                     username=self.s.ig_username or None,
+                                     seed_hash=legacy["seed_hash"],
+                                     refreshed_at=legacy["refreshed_at"])
+                log.info("moved the stored Instagram token to the accounts table")
         env = self.s.ig_access_token
         if not env:
             return
-        row = self.db.get_token(self.NAME)
+        row = self._row()
         if row is None or row["seed_hash"] != _hash(env):
-            self.db.save_token(self.NAME, env, expires_at=None, seed_hash=_hash(env))
+            self.db.save_account(self.account_id, env, expires_at=None,
+                                 username=self.s.ig_username or None, seed_hash=_hash(env))
             log.info("stored IG_ACCESS_TOKEN from .env; it will be refreshed automatically")
+        elif self.s.ig_username and not row["username"]:
+            self.db.set_account_username(self.account_id, self.s.ig_username)
 
     def current(self) -> str:
-        row = self.db.get_token(self.NAME)
-        return row["access_token"] if row else self.s.ig_access_token
+        row = self._row()
+        if row:
+            return row["access_token"]
+        # Not in the DB (yet): only the .env account has a fallback.
+        return self.s.ig_access_token if self.is_env_account else ""
 
     def days_left(self) -> float | None:
-        row = self.db.get_token(self.NAME)
+        row = self._row()
         if not row or not row["expires_at"]:
             return None
         return (row["expires_at"] - self.clock()) / DAY
 
     def status(self) -> dict[str, Any]:
-        """Token health for the admin endpoint. Never includes the token itself."""
-        row = self.db.get_token(self.NAME)
+        """Token health for the admin endpoints. Never includes the token itself."""
+        row = self._row()
         left = self.days_left()
+        env_fallback = self.is_env_account and bool(self.s.ig_access_token)
         return {
-            "configured": bool(row or self.s.ig_access_token),
-            "source": "database" if row else ("env" if self.s.ig_access_token else None),
+            "account_id": self.account_id,
+            "username": row["username"] if row else (self.s.ig_username or None
+                                                     if self.is_env_account else None),
+            "active": bool(row["active"]) if row else env_fallback,
+            "configured": bool(row) or env_fallback,
+            "source": "database" if row else ("env" if env_fallback else None),
             "auto_refresh": self.s.token_auto_refresh,
             "expires_at": _iso(row["expires_at"]) if row else None,
             "days_left": round(left, 1) if left is not None else None,
@@ -83,7 +132,7 @@ class TokenManager:
 
     # --- refreshing ------------------------------------------------------
     def needs_refresh(self) -> bool:
-        row = self.db.get_token(self.NAME)
+        row = self._row()
         if row is None:
             return False
         if not row["expires_at"]:
@@ -108,22 +157,29 @@ class TokenManager:
             return self._failed("response had no access_token")
         now = self.clock()
         expires_at = now + int(data.get("expires_in") or 60 * DAY)
-        self.db.save_token(self.NAME, new, expires_at=expires_at, refreshed_at=now)
-        log.info("Instagram token refreshed, valid until %s", _iso(expires_at))
+        if self._row() is None:  # .env fallback that wasn't seeded yet
+            self.db.save_account(self.account_id, new, expires_at=expires_at,
+                                 username=self.s.ig_username or None,
+                                 seed_hash=_hash(token), refreshed_at=now)
+        else:
+            self.db.save_account(self.account_id, new, expires_at=expires_at,
+                                 refreshed_at=now)
+        log.info("%s refreshed, valid until %s", self._label, _iso(expires_at))
         return True
 
     def _failed(self, error: str) -> bool:
-        if self.db.get_token(self.NAME) is not None:
-            self.db.set_token_error(self.NAME, error)
+        self.db.set_account_error(self.account_id, error)
         left = self.days_left()
         if left is not None and left <= 0:
-            log.error("Instagram token EXPIRED and refresh failed (%s). Generate a new token "
-                      "in the Meta dashboard and put it in IG_ACCESS_TOKEN.", error)
+            log.error("%s EXPIRED and refresh failed (%s). Generate a new token in the Meta "
+                      "dashboard and put it in IG_ACCESS_TOKEN (or reconnect the account).",
+                      self._label, error)
         elif left is not None and left < WARN_DAYS:
-            log.error("Instagram token expires in %.1f days and refresh failed (%s)", left, error)
+            log.error("%s expires in %.1f days and refresh failed (%s)",
+                      self._label, left, error)
         else:
             # A token younger than 24h can't be refreshed yet; that's normal right after setup.
-            log.warning("Instagram token refresh failed, will retry later: %s", error)
+            log.warning("%s refresh failed, will retry later: %s", self._label, error)
         return False
 
     def check(self) -> None:
@@ -135,13 +191,21 @@ class TokenManager:
             return
         left = self.days_left()
         if left is not None and left < WARN_DAYS:
-            log.warning("Instagram token expires in %.1f days", left)
+            log.warning("%s expires in %.1f days", self._label, left)
+
+    def check_all(self) -> None:
+        """Maintenance pass over every active account (paused ones are skipped)."""
+        for row in self.db.list_accounts(active_only=True):
+            try:
+                self.for_account(row["ig_user_id"]).check()
+            except Exception:  # one broken account must not stop the others
+                log.exception("token check crashed for account %s", row["ig_user_id"])
 
     async def run_forever(self) -> None:
         """Background loop started by the web server."""
         while True:
             try:
-                await asyncio.to_thread(self.check)
+                await asyncio.to_thread(self.check_all)
             except Exception:  # never let the loop die
                 log.exception("token check crashed")
             await asyncio.sleep(max(self.s.token_check_hours, 0.1) * 3600)

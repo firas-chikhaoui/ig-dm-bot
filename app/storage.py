@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS deletion_requests (
     deleted_rows INTEGER NOT NULL,
     created_at REAL NOT NULL       -- no user id is kept on purpose
 );
+CREATE TABLE IF NOT EXISTS accounts (
+    ig_user_id TEXT PRIMARY KEY,   -- Instagram professional account id
+    username TEXT,
+    access_token TEXT NOT NULL,
+    expires_at REAL,               -- unix time; NULL = unknown
+    active INTEGER NOT NULL DEFAULT 1,
+    seed_hash TEXT,                -- hash of the .env token this row was seeded from
+    refreshed_at REAL,             -- last successful token refresh
+    last_error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+-- Single-token table of older versions; moved into accounts on start, kept for old DBs.
 CREATE TABLE IF NOT EXISTS tokens (
     name TEXT PRIMARY KEY,         -- "instagram"
     access_token TEXT NOT NULL,
@@ -182,30 +195,65 @@ class Storage:
     def get_deletion(self, code: str) -> sqlite3.Row | None:
         return self._exec("SELECT * FROM deletion_requests WHERE code = ?", (code,)).fetchone()
 
-    # --- access tokens ---------------------------------------------------
-    def get_token(self, name: str) -> sqlite3.Row | None:
-        return self._exec("SELECT * FROM tokens WHERE name = ?", (name,)).fetchone()
+    # --- accounts (connected Instagram accounts and their tokens) ----------
+    def get_account(self, ig_user_id: str) -> sqlite3.Row | None:
+        return self._exec("SELECT * FROM accounts WHERE ig_user_id = ?",
+                          (ig_user_id,)).fetchone()
 
-    def save_token(self, name: str, access_token: str, expires_at: float | None,
-                   seed_hash: str | None = None, refreshed_at: float | None = None) -> None:
-        """Store a (new) token. Clears the last error; keeps seed_hash/refreshed_at if None."""
+    def list_accounts(self, active_only: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM accounts"
+        if active_only:
+            sql += " WHERE active = 1"
+        return self._exec(sql + " ORDER BY created_at, ig_user_id").fetchall()
+
+    def save_account(self, ig_user_id: str, access_token: str, expires_at: float | None,
+                     username: str | None = None, seed_hash: str | None = None,
+                     refreshed_at: float | None = None) -> None:
+        """Add an account or store a (new) token for it. Clears the last error.
+        username/seed_hash/refreshed_at are kept when passed as None; `active` is kept."""
+        now = time.time()
         self._exec(
-            """INSERT INTO tokens(name, access_token, expires_at, seed_hash, refreshed_at,
-                                  last_error, updated_at)
-               VALUES (?, ?, ?, ?, ?, NULL, ?)
-               ON CONFLICT(name) DO UPDATE SET
+            """INSERT INTO accounts(ig_user_id, username, access_token, expires_at, active,
+                                    seed_hash, refreshed_at, last_error, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 1, ?, ?, NULL, ?, ?)
+               ON CONFLICT(ig_user_id) DO UPDATE SET
+                 username = COALESCE(excluded.username, accounts.username),
                  access_token = excluded.access_token,
                  expires_at = excluded.expires_at,
-                 seed_hash = COALESCE(excluded.seed_hash, tokens.seed_hash),
-                 refreshed_at = COALESCE(excluded.refreshed_at, tokens.refreshed_at),
+                 seed_hash = COALESCE(excluded.seed_hash, accounts.seed_hash),
+                 refreshed_at = COALESCE(excluded.refreshed_at, accounts.refreshed_at),
                  last_error = NULL,
                  updated_at = excluded.updated_at""",
-            (name, access_token, expires_at, seed_hash, refreshed_at, time.time()),
+            (ig_user_id, username, access_token, expires_at, seed_hash, refreshed_at, now, now),
         )
 
-    def set_token_error(self, name: str, error: str | None) -> None:
-        self._exec("UPDATE tokens SET last_error = ?, updated_at = ? WHERE name = ?",
-                   (error, time.time(), name))
+    def set_account_username(self, ig_user_id: str, username: str) -> None:
+        self._exec("UPDATE accounts SET username = ?, updated_at = ? WHERE ig_user_id = ?",
+                   (username, time.time(), ig_user_id))
+
+    def set_account_active(self, ig_user_id: str, active: bool) -> bool:
+        """Pause (False) or resume (True) an account. Returns False if it doesn't exist."""
+        cur = self._exec("UPDATE accounts SET active = ?, updated_at = ? WHERE ig_user_id = ?",
+                         (1 if active else 0, time.time(), ig_user_id))
+        return cur.rowcount == 1
+
+    def set_account_error(self, ig_user_id: str, error: str | None) -> None:
+        self._exec("UPDATE accounts SET last_error = ?, updated_at = ? WHERE ig_user_id = ?",
+                   (error, time.time(), ig_user_id))
+
+    def delete_account(self, ig_user_id: str) -> bool:
+        return self._exec("DELETE FROM accounts WHERE ig_user_id = ?",
+                          (ig_user_id,)).rowcount == 1
+
+    def pop_legacy_token(self) -> sqlite3.Row | None:
+        """Return and remove the token stored by older versions (tokens table), if any."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tokens WHERE name = 'instagram'").fetchone()
+            if row is not None:
+                self._conn.execute("DELETE FROM tokens WHERE name = 'instagram'")
+                self._conn.commit()
+            return row
 
     # --- stats -----------------------------------------------------------
     def log_event(self, user_id: str | None, kind: str, detail: str = "") -> None:

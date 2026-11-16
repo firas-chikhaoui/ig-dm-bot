@@ -82,7 +82,7 @@ def test_failure_is_logged_without_token_and_stored(caplog):
     assert tm.current() == "env-token"
 
     # close to expiry -> error level
-    db.save_token("instagram", "env-token", expires_at=NOW + 3 * DAY)
+    db.save_account(tm.account_id, "env-token", expires_at=NOW + 3 * DAY)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="tokens"):
         tm.check()
@@ -129,3 +129,74 @@ def test_api_uses_current_token():
     tm.refresh()
     api.reply_to_comment("c1", "hi")
     assert seen == ["Bearer env-token", "Bearer new-1"]
+
+
+def test_env_account_is_stored_in_accounts_table():
+    tm, db, _, _ = make(ok, ig_user_id="1784", ig_username="shop")
+    row = db.get_account("1784")
+    assert row["access_token"] == "env-token" and row["username"] == "shop"
+    assert row["active"] == 1
+    st = tm.status()
+    assert st["account_id"] == "1784" and st["username"] == "shop" and st["active"] is True
+
+
+def test_default_account_key_without_ig_user_id():
+    tm, db, _, _ = make(ok, ig_user_id="")
+    assert tm.account_id == "default" and db.get_account("default") is not None
+
+
+def test_legacy_token_table_is_migrated():
+    db = Storage(":memory:")
+    db._exec("INSERT INTO tokens(name, access_token, expires_at, seed_hash, refreshed_at, "
+             "updated_at) VALUES ('instagram', 'refreshed-old', ?, ?, ?, ?)",
+             (NOW + 30 * DAY, None, NOW - DAY, NOW))
+    s = replace(Settings(), ig_access_token="", ig_user_id="1784", dry_run=False)
+    tm = TokenManager(s, db, clock=lambda: NOW)
+    tm.seed()
+    assert tm.current() == "refreshed-old" and round(tm.days_left()) == 30
+    assert db._exec("SELECT COUNT(*) FROM tokens").fetchone()[0] == 0
+
+
+def test_legacy_token_migrated_then_same_env_token_kept():
+    import hashlib
+    db = Storage(":memory:")
+    db._exec("INSERT INTO tokens(name, access_token, expires_at, seed_hash, updated_at) "
+             "VALUES ('instagram', 'refreshed-old', ?, ?, ?)",
+             (NOW + 30 * DAY, hashlib.sha256(b"env-token").hexdigest(), NOW))
+    s = replace(Settings(), ig_access_token="env-token", ig_user_id="1784", dry_run=False)
+    tm = TokenManager(s, db, clock=lambda: NOW)
+    tm.seed()
+    assert tm.current() == "refreshed-old"  # not replaced by the older .env token
+
+
+def test_check_all_refreshes_every_active_account():
+    tm, db, calls, _ = make(ok, ig_user_id="1")
+    db.save_account("2", "two", expires_at=NOW + 2 * DAY, username="second")
+    db.save_account("3", "three", expires_at=NOW + 2 * DAY)
+    db.set_account_active("3", False)
+    tm.check_all()
+    sent = sorted(c.url.params["access_token"] for c in calls)
+    assert sent == ["env-token", "two"]  # paused account 3 is skipped
+    assert db.get_account("2")["access_token"] == "new-1"
+    assert db.get_account("3")["access_token"] == "three"
+    assert tm.for_account("2").status()["username"] == "second"
+
+
+def test_other_accounts_have_no_env_fallback():
+    tm, _, _, _ = make(ok, ig_user_id="1")
+    other = tm.for_account("999")
+    assert other.current() == "" and other.status()["configured"] is False
+    assert other.refresh() is False
+
+
+def test_check_all_survives_one_broken_account(caplog):
+    def handler(request):
+        if request.url.params["access_token"] == "bad":
+            raise RuntimeError("boom")
+        return ok(request)
+    tm, db, calls, _ = make(handler, ig_user_id="1")
+    db.save_account("0", "bad", expires_at=None)
+    with caplog.at_level(logging.ERROR, logger="tokens"):
+        tm.check_all()
+    assert "crashed for account 0" in caplog.text
+    assert db.get_account("1")["access_token"] == "new-1"
