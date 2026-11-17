@@ -15,7 +15,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 📧 **Email capture**: validates the email and saves it to a waitlist (export as CSV)
 - 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
 - 🔑 **Automatic token refresh**: the 60-day Instagram token is renewed in the background before it expires
-- 👥 **Accounts table**: Instagram accounts and their tokens live in the database (seeded from `.env`), with pause/resume
+- 👥 **Multiple accounts**: Instagram accounts and their tokens live in the database (seeded from `.env`), with pause/resume; webhook events are routed to the right account automatically
 - 🚨 **Error alerts**: failed Instagram API calls are logged clearly, and optionally sent to you on Telegram
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
@@ -272,7 +272,9 @@ python scripts/accounts.py remove 1784xxxx
 python scripts/refresh_token.py --account 1784xxxx       # refresh one stored account now
 ```
 
-With Docker, prefix the commands with `docker compose exec bot`. While the `.env` account is paused, the bot ignores incoming webhook events.
+With Docker, prefix the commands with `docker compose exec bot`.
+
+**Routing.** All accounts share one webhook URL. Every webhook `entry` carries the id of the Instagram account it is about, and the bot hands it to that account, which replies with its own token. Events for a paused account are ignored. If the bot serves only one account, events with an unknown id still go to it (it logs the id once, so you can put it into `IG_USER_ID`); with several accounts, events for unknown ids are ignored with a warning. To test routing locally: `python scripts/simulate.py comment "guide" --account 1784xxxx`.
 
 ### 6. Error alerts on Telegram (optional)
 
@@ -335,6 +337,7 @@ app/
   privacy.py     privacy policy, data deletion page + Meta callback
   tokens.py      auto-refreshes the access token of every account
   accounts_cli.py  scripts/accounts.py: list/add/pause/resume/remove accounts
+  router.py      routes webhook events to the right account (one bot + API client each)
   alerts.py      optional Telegram alerts for errors
   storage.py     SQLite: state, dedup, emails, stats, accounts
   config.py      settings from .env

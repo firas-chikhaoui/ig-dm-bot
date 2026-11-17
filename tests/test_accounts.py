@@ -66,12 +66,12 @@ def test_admin_accounts_endpoint_and_pause(monkeypatch, tmp_path):
     m.db.set_account_active("42", False)
     calls = []
     monkeypatch.setattr(m.bot, "handle_webhook", lambda body: calls.append(body))
-    body = {"object": "instagram", "entry": []}
+    body = {"object": "instagram", "entry": [{"id": "42", "changes": []}]}
     raw = json.dumps(body).encode()
     headers = {"X-Hub-Signature-256":
                "sha256=" + hmac.new(b"secret", raw, hashlib.sha256).hexdigest()}
     r = c.post("/webhook", content=raw, headers=headers)
-    assert r.json().get("paused") is True and calls == []
+    assert r.json().get("paused") == ["42"] and calls == []
     m.db.set_account_active("42", True)
     r = c.post("/webhook", content=raw, headers=headers)
     assert "paused" not in r.json() and calls == [body]

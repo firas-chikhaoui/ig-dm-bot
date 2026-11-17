@@ -48,8 +48,11 @@ def describe_error(r: httpx.Response) -> str:
 
 class InstagramAPI:
     def __init__(self, settings: Settings, client: httpx.Client | None = None,
-                 token_provider: Callable[[], str] | None = None):
+                 token_provider: Callable[[], str] | None = None,
+                 account_id: str | None = None):
         self.s = settings
+        # Instagram account this client acts for (IG_USER_ID by default; "" = "me")
+        self.account_id = settings.ig_user_id if account_id is None else account_id
         # Where the access token comes from (the auto-refreshed one in the DB by default
         # in main.py); falls back to IG_ACCESS_TOKEN from .env.
         self.token = token_provider or (lambda: settings.ig_access_token)
@@ -98,7 +101,7 @@ class InstagramAPI:
     def send(self, recipient: dict[str, str], message: dict[str, Any]) -> dict[str, Any]:
         """recipient = {"id": IGSID} for normal DMs, or {"comment_id": ...} for a
         private reply to a comment (only ONE private reply per comment, within 7 days)."""
-        return self._post(f"{self.s.ig_user_id or 'me'}/messages",
+        return self._post(f"{self.account_id or 'me'}/messages",
                           {"recipient": recipient, "message": message})
 
     @staticmethod

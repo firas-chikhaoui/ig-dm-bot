@@ -19,11 +19,10 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from .alerts import setup_alerts
-from .bot import Bot
 from .config import settings
-from .instagram import InstagramAPI
 from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion_page,
                       delete_user, parse_signed_request, privacy_page)
+from .router import AccountRouter
 from .rules import RulesStore
 from .storage import Storage
 from .tokens import TokenManager
@@ -38,8 +37,9 @@ rules_store = RulesStore(settings.rules_path)
 db = Storage(settings.db_path)
 tokens = TokenManager(settings, db)
 tokens.seed()
-bot = Bot(InstagramAPI(settings, token_provider=tokens.current), rules_store, db,
-          own_id=settings.ig_user_id)
+# One bot + API client per Instagram account; webhook events are routed by entry id.
+router = AccountRouter(settings, db, rules_store, tokens)
+bot = router.default  # the .env account (also drives the playground)
 
 
 @asynccontextmanager
@@ -89,11 +89,6 @@ def _valid_signature(raw: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
 
 
-def _account_paused() -> bool:
-    row = db.get_account(tokens.account_id)
-    return row is not None and not row["active"]
-
-
 # --- Webhook events (comments, messages, button clicks)
 @app.post("/webhook")
 async def webhook(request: Request, background: BackgroundTasks):
@@ -104,12 +99,21 @@ async def webhook(request: Request, background: BackgroundTasks):
         body = json.loads(raw or b"{}")
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="invalid json")
-    if _account_paused():
-        log.info("account %s is paused, ignoring webhook event", tokens.account_id)
-        return {"ok": True, "paused": True}
-    # Answer Meta fast (they retry on slow responses); do the work in the background.
-    background.add_task(bot.handle_webhook, body)
-    return {"ok": True}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    routed = router.route(body)
+    for account_id in routed.paused:
+        log.info("account %s is paused, ignoring its webhook events", account_id)
+    # Answer Meta fast (they retry on slow responses); do the work in the background,
+    # each account with its own token.
+    for account_id, part in routed.bodies.items():
+        background.add_task(router.bot_for(account_id).handle_webhook, part)
+    resp: dict = {"ok": True}
+    if routed.paused:
+        resp["paused"] = routed.paused
+    if routed.unknown:
+        resp["unknown"] = routed.unknown
+    return resp
 
 
 # --- Privacy policy + data deletion (both URLs go into the Meta app settings) --

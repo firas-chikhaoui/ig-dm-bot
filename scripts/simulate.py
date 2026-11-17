@@ -7,6 +7,7 @@ Start the bot first (with DRY_RUN=true in .env), then in a 2nd terminal:
   python scripts/simulate.py dm "me@example.com"                  # type a DM
 
 Options: --media <reel id>  --user <user id>  --username <name>  --url <bot url>
+         --account <instagram account id the event is for (default: IG_USER_ID)>
 Watch the bot's terminal: every message it WOULD send is logged as [DRY_RUN].
 """
 import argparse
@@ -42,6 +43,8 @@ def main() -> None:
     p.add_argument("--user", default="111")
     p.add_argument("--username", default="test_user")
     p.add_argument("--url", default="http://127.0.0.1:8000/webhook")
+    p.add_argument("--account", default=settings.ig_user_id,
+                   help="Instagram account id the event is for (routes to that account)")
     a = p.parse_args()
     uid = f"{a.kind}-{time.time_ns()}"  # unique id so dedup doesn't drop it
 
@@ -60,6 +63,12 @@ def main() -> None:
         body = {"object": "instagram", "entry": [{"messaging": [{
             "sender": {"id": a.user}, "recipient": {"id": settings.ig_user_id},
             "message": {"mid": uid, "text": " ".join(a.args)}}]}]}
+
+    if a.account:
+        for entry in body["entry"]:
+            entry["id"] = a.account
+            for ev in entry.get("messaging", []):
+                ev["recipient"]["id"] = a.account
 
     raw = json.dumps(body).encode()
     headers = {"Content-Type": "application/json"}
