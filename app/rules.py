@@ -237,3 +237,97 @@ class RulesStore:
                     log.info("rules.yaml changed -> reloaded")
                 self._rules, self._mtime = new, mtime
             return self._rules
+
+
+def parse_rules_yaml(text: str) -> Rules:
+    """Parse and validate rules given as YAML text. Raises RulesError on any problem."""
+    try:
+        data = yaml.safe_load(text or "")
+    except yaml.YAMLError as e:
+        raise RulesError(f"invalid YAML: {e}") from e
+    return parse_rules(data if data is not None else {})
+
+
+class AccountRules:
+    """The rules of one account, with the same `get()` interface as RulesStore."""
+
+    def __init__(self, store: "AccountRulesStore", account_id: str):
+        self.store = store
+        self.account_id = account_id
+
+    def get(self) -> Rules:
+        return self.store.get(self.account_id)
+
+    @property
+    def source(self) -> str:
+        """"database" when this account has its own rules, else "file" (rules.yaml)."""
+        return self.store.source(self.account_id)
+
+
+class AccountRulesStore:
+    """Rules per Instagram account, stored in the database.
+
+    An account without stored rules uses the shared rules file (rules.yaml), so a
+    single-account setup keeps working as before. Rules are always validated before
+    they are saved; YAML text is the import/export format.
+    """
+
+    def __init__(self, db: Any, file_store: RulesStore):
+        self.db = db
+        self.file = file_store
+        self._lock = threading.Lock()
+        self._cache: dict[str, tuple[float, Rules]] = {}  # account -> (updated_at, rules)
+
+    def for_account(self, account_id: str) -> AccountRules:
+        return AccountRules(self, account_id)
+
+    def get(self, account_id: str) -> Rules:
+        row = self.db.get_account_rules(account_id)
+        if row is None:
+            self._cache.pop(account_id, None)
+            return self.file.get()
+        with self._lock:
+            cached = self._cache.get(account_id)
+            if cached and cached[0] == row["updated_at"]:
+                return cached[1]
+            try:
+                rules = parse_rules_yaml(row["yaml"])
+            except RulesError as e:
+                # Only possible if the row was edited by hand; keep the bot answering.
+                if cached:
+                    log.error("stored rules of account %s are invalid, keeping previous "
+                              "rules: %s", account_id, e)
+                    return cached[1]
+                log.error("stored rules of account %s are invalid, using %s: %s",
+                          account_id, self.file.path, e)
+                return self.file.get()
+            self._cache[account_id] = (row["updated_at"], rules)
+            return rules
+
+    def source(self, account_id: str) -> str:
+        return "database" if self.db.get_account_rules(account_id) is not None else "file"
+
+    def export_yaml(self, account_id: str) -> str:
+        """The account's rules as YAML (its stored rules, or the rules file it falls back to)."""
+        row = self.db.get_account_rules(account_id)
+        if row is not None:
+            return row["yaml"]
+        with open(self.file.path, encoding="utf-8") as f:
+            return f.read()
+
+    def import_yaml(self, account_id: str, text: str) -> Rules:
+        """Validate YAML rules and store them for one account. Raises RulesError if invalid;
+        nothing is saved then. The text is kept as is, comments included."""
+        rules = parse_rules_yaml(text)
+        self.db.save_account_rules(account_id, text)
+        with self._lock:
+            self._cache.pop(account_id, None)
+        log.info("rules of account %s saved (%d reel rule(s), %d flow(s))",
+                 account_id, len(rules.reels), len(rules.flows))
+        return rules
+
+    def reset(self, account_id: str) -> bool:
+        """Delete the account's stored rules so it uses the rules file again."""
+        with self._lock:
+            self._cache.pop(account_id, None)
+        return self.db.delete_account_rules(account_id)

@@ -8,7 +8,7 @@ from typing import Any
 from .instagram import InstagramAPI
 from .privacy import (DEFAULT_DELETE_KEYWORDS, DEFAULT_DELETE_REPLY, delete_user,
                       matches_delete_keyword)
-from .rules import RulesStore
+from .rules import AccountRules, RulesStore
 from .storage import Storage
 
 log = logging.getLogger("bot")
@@ -42,7 +42,7 @@ def render(text: str, **ctx: Any) -> str:
 
 
 class Bot:
-    def __init__(self, api: InstagramAPI, rules: RulesStore, db: Storage, own_id: str = ""):
+    def __init__(self, api: InstagramAPI, rules: RulesStore | AccountRules, db: Storage, own_id: str = ""):
         self.api = api
         self.rules = rules
         self.db = db

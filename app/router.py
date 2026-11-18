@@ -24,7 +24,7 @@ import httpx
 from .bot import Bot
 from .config import Settings
 from .instagram import InstagramAPI
-from .rules import RulesStore
+from .rules import AccountRulesStore, RulesStore
 from .storage import Storage
 from .tokens import DEFAULT_ACCOUNT, TokenManager
 
@@ -40,11 +40,14 @@ class RouteResult:
 
 
 class AccountRouter:
-    def __init__(self, settings: Settings, db: Storage, rules: RulesStore,
-                 tokens: TokenManager, client: httpx.Client | None = None):
+    def __init__(self, settings: Settings, db: Storage,
+                 rules: AccountRulesStore | RulesStore, tokens: TokenManager,
+                 client: httpx.Client | None = None):
         self.s = settings
         self.db = db
-        self.rules = rules
+        # Each account uses its own stored rules, or the rules file when it has none.
+        self.rules = rules if isinstance(rules, AccountRulesStore) else \
+            AccountRulesStore(db, rules)
         self.tokens = tokens
         self.client = client or httpx.Client(timeout=15)
         self._bots: dict[str, Bot] = {}
@@ -71,7 +74,8 @@ class AccountRouter:
                 ig_id = "" if account_id == DEFAULT_ACCOUNT else account_id
                 api = InstagramAPI(self.s, self.client, token_provider=tm.current,
                                    account_id=ig_id)
-                bot = self._bots[account_id] = Bot(api, self.rules, self.db, own_id=ig_id)
+                bot = self._bots[account_id] = Bot(api, self.rules.for_account(account_id), self.db,
+                                                   own_id=ig_id)
             return bot
 
     # --- routing ---------------------------------------------------------

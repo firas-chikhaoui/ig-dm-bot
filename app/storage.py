@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS account_rules (
+    account_id TEXT PRIMARY KEY,   -- Instagram account id (or "default")
+    yaml TEXT NOT NULL,            -- validated rules, same format as rules.yaml
+    updated_at REAL NOT NULL
+);
 -- Single-token table of older versions; moved into accounts on start, kept for old DBs.
 CREATE TABLE IF NOT EXISTS tokens (
     name TEXT PRIMARY KEY,         -- "instagram"
@@ -242,8 +247,42 @@ class Storage:
                    (error, time.time(), ig_user_id))
 
     def delete_account(self, ig_user_id: str) -> bool:
-        return self._exec("DELETE FROM accounts WHERE ig_user_id = ?",
-                          (ig_user_id,)).rowcount == 1
+        """Delete an account, its token and its stored rules."""
+        with self._lock:
+            n = self._conn.execute("DELETE FROM accounts WHERE ig_user_id = ?",
+                                   (ig_user_id,)).rowcount
+            self._conn.execute("DELETE FROM account_rules WHERE account_id = ?", (ig_user_id,))
+            self._conn.commit()
+        return n == 1
+
+    # --- rules per account -------------------------------------------------
+    def get_account_rules(self, account_id: str) -> sqlite3.Row | None:
+        return self._exec("SELECT * FROM account_rules WHERE account_id = ?",
+                          (account_id,)).fetchone()
+
+    def save_account_rules(self, account_id: str, yaml_text: str) -> None:
+        """Store (already validated) rules for one account."""
+        with self._lock:
+            # updated_at must change on every save: it is the cache key of the parsed rules.
+            prev = self._conn.execute("SELECT updated_at FROM account_rules WHERE account_id = ?",
+                                      (account_id,)).fetchone()
+            now = time.time()
+            if prev is not None and now <= prev[0]:
+                now = prev[0] + 1e-6
+            self._conn.execute(
+                """INSERT INTO account_rules(account_id, yaml, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(account_id) DO UPDATE SET yaml = excluded.yaml,
+                     updated_at = excluded.updated_at""",
+                (account_id, yaml_text, now))
+            self._conn.commit()
+
+    def delete_account_rules(self, account_id: str) -> bool:
+        return self._exec("DELETE FROM account_rules WHERE account_id = ?",
+                          (account_id,)).rowcount == 1
+
+    def list_account_rules(self) -> list[sqlite3.Row]:
+        return self._exec("SELECT account_id, updated_at FROM account_rules "
+                          "ORDER BY account_id").fetchall()
 
     def pop_legacy_token(self) -> sqlite3.Row | None:
         """Return and remove the token stored by older versions (tokens table), if any."""

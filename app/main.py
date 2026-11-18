@@ -23,7 +23,7 @@ from .config import settings
 from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion_page,
                       delete_user, parse_signed_request, privacy_page)
 from .router import AccountRouter
-from .rules import RulesStore
+from .rules import AccountRulesStore, RulesError, RulesStore, parse_rules_yaml
 from .storage import Storage
 from .tokens import TokenManager
 
@@ -33,12 +33,13 @@ log = logging.getLogger("main")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 alerts = setup_alerts(settings)  # Telegram alerts on errors, if configured
 
-rules_store = RulesStore(settings.rules_path)
+rules_store = RulesStore(settings.rules_path)  # shared rules file, the fallback
 db = Storage(settings.db_path)
+account_rules = AccountRulesStore(db, rules_store)  # rules per account, in the database
 tokens = TokenManager(settings, db)
 tokens.seed()
 # One bot + API client per Instagram account; webhook events are routed by entry id.
-router = AccountRouter(settings, db, rules_store, tokens)
+router = AccountRouter(settings, db, account_rules, tokens)
 bot = router.default  # the .env account (also drives the playground)
 
 
@@ -47,6 +48,9 @@ async def lifespan(_: FastAPI):
     r = rules_store.get()  # fail fast if rules.yaml is broken
     log.info("loaded %d reel rule(s), %d flow(s)%s", len(r.reels), len(r.flows),
              " [DRY_RUN]" if settings.dry_run else "")
+    for row in db.list_account_rules():
+        account_rules.get(row["account_id"])  # logs if stored rules are broken
+        log.info("account %s uses its own rules from the database", row["account_id"])
     if not settings.app_secret:
         log.warning("APP_SECRET is empty: webhook signatures are NOT verified")
     refresher = None
@@ -118,7 +122,7 @@ async def webhook(request: Request, background: BackgroundTasks):
 
 # --- Privacy policy + data deletion (both URLs go into the Meta app settings) --
 def _delete_keywords() -> list[str]:
-    cfg = rules_store.get().settings.get("data_deletion") or {}
+    cfg = bot.rules.get().settings.get("data_deletion") or {}
     return list(cfg.get("keywords", DEFAULT_DELETE_KEYWORDS) or [])
 
 
@@ -164,7 +168,7 @@ def _check_admin(token: str) -> None:
 @app.get("/admin/stats")
 def stats(token: str = ""):
     _check_admin(token)
-    r = rules_store.get()
+    r = bot.rules.get()
     return {"stats": db.stats(), "reels": len(r.reels), "flows": list(r.flows)}
 
 
@@ -221,8 +225,72 @@ def accounts(token: str = ""):
     ids = [r["ig_user_id"] for r in db.list_accounts()]
     if tokens.account_id not in ids and tokens.current():
         ids.insert(0, tokens.account_id)  # .env token not stored yet
-    return {"accounts": [tokens.for_account(i).status() for i in ids],
+    return {"accounts": [{**tokens.for_account(i).status(), "rules": account_rules.source(i)}
+                         for i in ids],
             "default": tokens.account_id}
+
+
+def _rules_account(account: str | None) -> str:
+    """The .env account by default, or any account stored in the database."""
+    if not account or account == tokens.account_id:
+        return tokens.account_id
+    if db.get_account(account) is None:
+        raise HTTPException(status_code=404, detail="unknown account")
+    return account
+
+
+@app.get("/admin/rules")
+def rules_export(token: str = "", account: str | None = None):
+    """An account's rules as YAML: its stored rules, or rules.yaml when it has none.
+    The X-Rules-Source header says which ("database" or "file")."""
+    _check_admin(token)
+    acc = _rules_account(account)
+    return PlainTextResponse(account_rules.export_yaml(acc), media_type="text/yaml",
+                             headers={"X-Rules-Source": account_rules.source(acc),
+                                      "Content-Disposition":
+                                          f'inline; filename="rules-{acc}.yaml"'})
+
+
+async def _yaml_body(request: Request) -> str:
+    raw = await request.body()
+    if len(raw) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="rules too large")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="rules must be UTF-8 text")
+
+
+@app.post("/admin/rules/validate")
+async def rules_validate(request: Request, token: str = ""):
+    """Check YAML rules without saving them."""
+    _check_admin(token)
+    try:
+        r = parse_rules_yaml(await _yaml_body(request))
+    except RulesError as e:
+        return {"valid": False, "error": str(e)}
+    return {"valid": True, "reels": len(r.reels), "flows": list(r.flows)}
+
+
+@app.put("/admin/rules")
+async def rules_import(request: Request, token: str = "", account: str | None = None):
+    """Validate YAML rules and store them for one account (default: the .env account).
+    Invalid rules are rejected with 400 and the live rules stay unchanged."""
+    _check_admin(token)
+    acc = _rules_account(account)
+    try:
+        r = account_rules.import_yaml(acc, await _yaml_body(request))
+    except RulesError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"saved": True, "account": acc, "reels": len(r.reels), "flows": list(r.flows)}
+
+
+@app.delete("/admin/rules")
+def rules_reset(token: str = "", account: str | None = None):
+    """Delete an account's stored rules; it uses rules.yaml again."""
+    _check_admin(token)
+    acc = _rules_account(account)
+    return {"deleted": account_rules.reset(acc), "account": acc, "source": "file"}
 
 
 @app.post("/admin/alerts/test")
@@ -279,7 +347,7 @@ def playground():
 @app.get("/playground/info")
 def playground_info():
     _require_dry_run()
-    r = rules_store.get()
+    r = bot.rules.get()
     return {"reels": [{"id": x.id, "name": x.name or x.flow, "keywords": x.keywords}
                       for x in r.reels],
             "dm_keywords": [k for t in r.dm_triggers for k in t.keywords]}

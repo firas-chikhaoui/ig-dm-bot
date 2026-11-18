@@ -5,6 +5,10 @@
     python scripts/accounts.py pause 1784...                # stop answering this account
     python scripts/accounts.py resume 1784...
     python scripts/accounts.py remove 1784...
+    python scripts/accounts.py rules-export 1784... -o shop.yaml   # rules as YAML
+    python scripts/accounts.py rules-import 1784... shop.yaml      # validate + store
+    python scripts/accounts.py rules-reset 1784...                 # back to rules.yaml
+    python scripts/accounts.py rules-validate shop.yaml            # check only
 
 The account from IG_USER_ID / IG_ACCESS_TOKEN in .env is added automatically on start.
 Tokens are never printed.

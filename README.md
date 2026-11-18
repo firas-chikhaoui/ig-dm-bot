@@ -274,6 +274,17 @@ python scripts/refresh_token.py --account 1784xxxx       # refresh one stored ac
 
 With Docker, prefix the commands with `docker compose exec bot`.
 
+**Rules per account.** Every account can have its own rules, stored in the database in the same YAML format as `rules.yaml`. An account without stored rules uses `rules.yaml`, so a single-account setup needs nothing new. Rules are validated before they are saved: an invalid file is rejected and the live rules stay as they were. The running bot picks up saved rules right away, no restart.
+
+```bash
+python scripts/accounts.py rules-export 1784xxxx -o shop.yaml   # current rules as YAML (start from rules.yaml)
+python scripts/accounts.py rules-validate shop.yaml             # check a file, save nothing
+python scripts/accounts.py rules-import 1784xxxx shop.yaml      # validate + store for this account
+python scripts/accounts.py rules-reset 1784xxxx                 # delete stored rules, use rules.yaml again
+```
+
+The same works over HTTP (see [Admin endpoints](#admin-endpoints)), e.g. `curl -X PUT --data-binary @shop.yaml "https://YOUR-DOMAIN/admin/rules?token=ADMIN_TOKEN&account=1784xxxx"`. Removing an account also removes its rules. The playground runs the rules of the `.env` account.
+
 **Routing.** All accounts share one webhook URL. Every webhook `entry` carries the id of the Instagram account it is about, and the bot hands it to that account, which replies with its own token. Events for a paused account are ignored. If the bot serves only one account, events with an unknown id still go to it (it logs the id once, so you can put it into `IG_USER_ID`); with several accounts, events for unknown ids are ignored with a warning. To test routing locally: `python scripts/simulate.py comment "guide" --account 1784xxxx`.
 
 ### 6. Error alerts on Telegram (optional)
@@ -320,6 +331,10 @@ The token is kept only in that browser tab (session storage) and the page cannot
 | `GET /admin/accounts?token=ADMIN_TOKEN` | Stored Instagram accounts with token health |
 | `GET /admin/token?token=ADMIN_TOKEN&account=ID` | Token expiry, last refresh and last error (`account` optional, default: the `.env` account) |
 | `POST /admin/token/refresh?token=ADMIN_TOKEN&account=ID` | Refreshes a token now |
+| `GET /admin/rules?token=ADMIN_TOKEN&account=ID` | An account's rules as YAML; header `X-Rules-Source` is `database` or `file` |
+| `PUT /admin/rules?token=ADMIN_TOKEN&account=ID` | Validates the YAML body and stores it as the account's rules (`400` with the error if invalid) |
+| `POST /admin/rules/validate?token=ADMIN_TOKEN` | Checks a YAML body without saving it |
+| `DELETE /admin/rules?token=ADMIN_TOKEN&account=ID` | Deletes the stored rules; the account uses `rules.yaml` again |
 | `POST /admin/alerts/test?token=ADMIN_TOKEN` | Sends a test message to your Telegram alert chat |
 | `DELETE /admin/users/<user_id>?token=ADMIN_TOKEN` | Deletes everything stored about one person |
 | `GET /privacy`, `GET /data-deletion` | Public privacy policy and data deletion pages |
@@ -332,14 +347,14 @@ app/
   main.py        web server: webhook + admin endpoints
   admin.html     admin dashboard (stats, token health, CSV export)
   bot.py         flow engine (comments, buttons, follow gate, email)
-  rules.py       rules.yaml loader, validation, hot reload
+  rules.py       rules loader + validation: rules.yaml (hot reload) and rules per account
   instagram.py   Instagram API client
   privacy.py     privacy policy, data deletion page + Meta callback
   tokens.py      auto-refreshes the access token of every account
-  accounts_cli.py  scripts/accounts.py: list/add/pause/resume/remove accounts
+  accounts_cli.py  scripts/accounts.py: manage accounts, import/export their rules
   router.py      routes webhook events to the right account (one bot + API client each)
   alerts.py      optional Telegram alerts for errors
-  storage.py     SQLite: state, dedup, emails, stats, accounts
+  storage.py     SQLite: state, dedup, emails, stats, accounts, rules per account
   config.py      settings from .env
 rules.yaml       your reels, keywords and flows
 Caddyfile        HTTPS reverse proxy for production (docker compose --profile https)
