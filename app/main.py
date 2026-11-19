@@ -16,10 +16,11 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from .alerts import setup_alerts
 from .config import settings
+from .oauth import CALLBACK_PATH, InstagramOAuth, OAuthError, result_page
 from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion_page,
                       delete_user, parse_signed_request, privacy_page)
 from .router import AccountRouter
@@ -41,6 +42,7 @@ tokens.seed()
 # One bot + API client per Instagram account; webhook events are routed by entry id.
 router = AccountRouter(settings, db, account_rules, tokens)
 bot = router.default  # the .env account (also drives the playground)
+oauth = InstagramOAuth(settings, db)  # "Connect Instagram"
 
 
 @asynccontextmanager
@@ -228,6 +230,54 @@ def accounts(token: str = ""):
     return {"accounts": [{**tokens.for_account(i).status(), "rules": account_rules.source(i)}
                          for i in ids],
             "default": tokens.account_id}
+
+
+# --- Connect Instagram (OAuth) ---------------------------------------------
+_NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+             "X-Frame-Options": "DENY"}
+
+
+def _connect_url(request: Request) -> str:
+    if settings.dry_run:
+        raise HTTPException(status_code=409, detail="not available in DRY_RUN")
+    try:
+        return oauth.authorize_url(str(request.base_url))
+    except OAuthError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.get("/admin/connect")
+def connect_start(request: Request, token: str = ""):
+    """Send the browser to Instagram's login to connect (or reconnect) an account."""
+    _check_admin(token)
+    return RedirectResponse(_connect_url(request), status_code=302, headers=_NO_STORE)
+
+
+@app.post("/admin/connect")
+def connect_url(request: Request, token: str = ""):
+    """Same as GET, but returns the Instagram login URL as JSON (used by the dashboard)."""
+    _check_admin(token)
+    return {"url": _connect_url(request)}
+
+
+@app.get(CALLBACK_PATH, response_class=HTMLResponse)
+def connect_callback(request: Request, code: str = "", state: str = "",
+                     error: str = "", error_description: str = ""):
+    """Instagram sends the browser back here after the login. Protected by the signed,
+    single-use `state` created in /admin/connect."""
+    if error:
+        try:
+            oauth.check_state(state)  # don't let anyone show text on our domain
+            msg = error_description or error
+        except OAuthError:
+            msg = "The login was cancelled."
+        return HTMLResponse(result_page(error=f"Instagram login cancelled: {msg}"),
+                            status_code=400, headers=_NO_STORE)
+    try:
+        result = oauth.complete(code, state, str(request.base_url))
+    except OAuthError as e:
+        return HTMLResponse(result_page(error=str(e)), status_code=400, headers=_NO_STORE)
+    return HTMLResponse(result_page(result), headers=_NO_STORE)
 
 
 def _rules_account(account: str | None) -> str:

@@ -39,8 +39,9 @@ Checklist for the App Dashboard. Replace `bot.yourdomain.com` with your domain.
 
 **Instagram → API setup with Instagram login**
 
+- [ ] Business login settings → **OAuth redirect URIs** contains `https://bot.yourdomain.com/connect/callback` (needed for client accounts to connect themselves)
 - [ ] Webhook callback URL `https://bot.yourdomain.com/webhook`, verify token = `VERIFY_TOKEN`, subscribed to **`comments`**, **`messages`** and **`messaging_postbacks`**
-- [ ] Your account is added and has a token (`IG_ACCESS_TOKEN`), and **Allow access to messages** is on in the Instagram app (*Settings → Messages and story replies → Message controls → Connected tools*)
+- [ ] Your account is added and has a token (`IG_ACCESS_TOKEN`, or connected with the dashboard's **Connect Instagram** button), and **Allow access to messages** is on in the Instagram app (*Settings → Messages and story replies → Message controls → Connected tools*)
 
 **The bot itself**
 

@@ -16,6 +16,7 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
 - 🔑 **Automatic token refresh**: the 60-day Instagram token is renewed in the background before it expires
 - 👥 **Multiple accounts**: Instagram accounts and their tokens live in the database (seeded from `.env`), with pause/resume; webhook events are routed to the right account automatically
+- 🔗 **Connect Instagram** button: add an account with the official Instagram login, no copying tokens by hand
 - 🚨 **Error alerts**: failed Instagram API calls are logged clearly, and optionally sent to you on Telegram
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
@@ -105,6 +106,8 @@ check_follow:
    Permissions needed: `instagram_business_basic`, `instagram_business_manage_messages`, `instagram_business_manage_comments`.
 4. Copy the **Instagram app secret**. This is the `APP_SECRET`.
 5. In the Instagram app on your phone, go to *Settings → Messages and story replies → Message controls → Connected tools* and turn on **Allow access to messages**.
+
+> Instead of generating and copying the token in step 3 you can also use the **Connect Instagram** button once the bot runs on HTTPS, see [Connect Instagram](#connect-instagram-oauth).
 
 ### Privacy policy and data deletion (required by Meta)
 
@@ -274,6 +277,24 @@ python scripts/refresh_token.py --account 1784xxxx       # refresh one stored ac
 
 With Docker, prefix the commands with `docker compose exec bot`.
 
+#### Connect Instagram (OAuth)
+
+Instead of generating a token in the Meta dashboard and pasting it, an account can be connected with Instagram's own login screen. This is also how you add a client's account: they log in, the bot gets a 60-day token, stores the account and refreshes the token from then on.
+
+One-time setup:
+
+1. In the Meta dashboard, open your app → **Instagram → API setup with Instagram login → 3. Set up Instagram business login → Business login settings**.
+2. Under **OAuth redirect URIs** add `https://YOUR-DOMAIN/connect/callback` and save.
+3. Copy the **Instagram app ID** shown on the same page into `.env` as `IG_APP_ID` (the matching **Instagram app secret** is your `APP_SECRET`). Make sure `PUBLIC_URL` and `ADMIN_TOKEN` are set, then restart.
+
+Then open the dashboard and click **➕ Connect Instagram account** (or open `https://YOUR-DOMAIN/admin/connect?token=ADMIN_TOKEN`). Log in on Instagram, allow the three permissions, and you land on a confirmation page. The bot then:
+
+- exchanges the login code for a long-lived token (the token is never shown or logged),
+- stores the account with its id, username and expiry (connecting an existing account again just replaces its token; a paused account stays paused),
+- subscribes the account to the `comments`, `messages` and `messaging_postbacks` webhooks.
+
+The login link is signed and works once, for 15 minutes. If your redirect URI is not `PUBLIC_URL` + `/connect/callback`, set `OAUTH_REDIRECT_URI` to exactly the URI you entered in the Meta dashboard. Accounts other than your own (and those you added as testers to the app) can only connect after Meta App Review, see [docs/app-review.md](docs/app-review.md). Not available in `DRY_RUN`.
+
 **Rules per account.** Every account can have its own rules, stored in the database in the same YAML format as `rules.yaml`. An account without stored rules uses `rules.yaml`, so a single-account setup needs nothing new. Rules are validated before they are saved: an invalid file is rejected and the live rules stay as they were. The running bot picks up saved rules right away, no restart.
 
 ```bash
@@ -315,7 +336,7 @@ Open `https://YOUR-DOMAIN/admin` and enter your `ADMIN_TOKEN`. The dashboard sho
 - 📊 totals: flows started, comment replies, button clicks, emails, follow checks
 - 📈 flows started per day for the last 14 days, and your most used flows
 - 🔑 Instagram token health (days left, last refresh, last error)
-- buttons to download the email list as CSV, refresh the token and send a test alert
+- buttons to download the email list as CSV, refresh the token, send a test alert and connect another Instagram account
 
 The token is kept only in that browser tab (session storage) and the page cannot be embedded in other sites. Without `ADMIN_TOKEN` in `.env` the dashboard is turned off.
 
@@ -335,6 +356,8 @@ The token is kept only in that browser tab (session storage) and the page cannot
 | `PUT /admin/rules?token=ADMIN_TOKEN&account=ID` | Validates the YAML body and stores it as the account's rules (`400` with the error if invalid) |
 | `POST /admin/rules/validate?token=ADMIN_TOKEN` | Checks a YAML body without saving it |
 | `DELETE /admin/rules?token=ADMIN_TOKEN&account=ID` | Deletes the stored rules; the account uses `rules.yaml` again |
+| `GET /admin/connect?token=ADMIN_TOKEN` | Redirects to Instagram's login to connect an account (`POST` returns the URL as JSON) |
+| `GET /connect/callback` | Where Instagram sends the browser back after the login (add it as OAuth redirect URI) |
 | `POST /admin/alerts/test?token=ADMIN_TOKEN` | Sends a test message to your Telegram alert chat |
 | `DELETE /admin/users/<user_id>?token=ADMIN_TOKEN` | Deletes everything stored about one person |
 | `GET /privacy`, `GET /data-deletion` | Public privacy policy and data deletion pages |
@@ -351,6 +374,7 @@ app/
   instagram.py   Instagram API client
   privacy.py     privacy policy, data deletion page + Meta callback
   tokens.py      auto-refreshes the access token of every account
+  oauth.py       "Connect Instagram" login flow: code -> long-lived token -> stored account
   accounts_cli.py  scripts/accounts.py: manage accounts, import/export their rules
   router.py      routes webhook events to the right account (one bot + API client each)
   alerts.py      optional Telegram alerts for errors
@@ -368,7 +392,7 @@ tests/
 
 - [x] Web dashboard to see stats, token health and export emails
 - [ ] Edit rules from the dashboard
-- [ ] Multiple Instagram accounts
+- [x] Multiple Instagram accounts
 - [ ] Send waitlist emails to a newsletter tool (Mailchimp, Brevo, etc.)
 
 ## License

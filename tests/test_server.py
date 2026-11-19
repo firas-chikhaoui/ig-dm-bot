@@ -131,3 +131,49 @@ def test_admin_dashboard_off_without_token(monkeypatch, tmp_path):
     importlib.reload(app.config)
     importlib.reload(app.main)
     assert TestClient(app.main.app).get("/admin").status_code == 404
+
+
+def test_connect_instagram_endpoints(monkeypatch, tmp_path):
+    from urllib.parse import parse_qs, urlparse
+
+    monkeypatch.setenv("IG_APP_ID", "12345")
+    monkeypatch.setenv("PUBLIC_URL", "https://bot.example.com")
+    c = make_client(monkeypatch, tmp_path)
+    # DRY_RUN: no real Instagram calls
+    assert c.post("/admin/connect", params={"token": "admin"}).status_code == 409
+
+    monkeypatch.setenv("DRY_RUN", "false")
+    import app.config
+    import app.main
+    importlib.reload(app.config)
+    importlib.reload(app.main)
+    c = TestClient(app.main.app)
+    assert c.get("/admin/connect").status_code == 401
+    r = c.get("/admin/connect", params={"token": "admin"}, follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("https://www.instagram.com/oauth/authorize?")
+    url = c.post("/admin/connect", params={"token": "admin"}).json()["url"]
+    state = parse_qs(urlparse(url).query)["state"][0]
+
+    # forged state: nothing is called, nothing saved
+    r = c.get("/connect/callback", params={"code": "x", "state": "a.b.c"})
+    assert r.status_code == 400 and "invalid" in r.text
+    # user cancelled on Instagram
+    r = c.get("/connect/callback", params={"error": "access_denied",
+                                           "error_description": "User denied", "state": state})
+    assert r.status_code == 400 and "User denied" in r.text
+
+    def fake_complete(code, st, base_url=""):
+        app.main.oauth.check_state(st)
+        from app.oauth import ConnectResult
+        app.main.db.save_account("777", "secret-tok-123", expires_at=2e9, username="shop")
+        return ConnectResult("777", "shop", 2e9, True, webhooks_subscribed=True)
+    monkeypatch.setattr(app.main.oauth, "complete", fake_complete)
+    url = c.post("/admin/connect", params={"token": "admin"}).json()["url"]
+    state = parse_qs(urlparse(url).query)["state"][0]
+    r = c.get("/connect/callback", params={"code": "good", "state": state})
+    assert r.status_code == 200 and "@shop" in r.text and "secret-tok-123" not in r.text
+    assert r.headers["cache-control"] == "no-store"
+    ids = [a["account_id"] for a in
+           c.get("/admin/accounts", params={"token": "admin"}).json()["accounts"]]
+    assert "777" in ids

@@ -86,6 +86,7 @@
     <button id="csv">⬇ Download emails (CSV)</button>
     <button id="refreshToken">🔑 Refresh token now</button>
     <button id="testAlert">🚨 Send test alert</button>
+    <button id="connect">➕ Connect Instagram account</button>
     <span id="msg"></span>
   </div>
 </main>
@@ -205,6 +206,12 @@ $("refreshToken").onclick = (e) => action(e.target, async () => {
 $("testAlert").onclick = (e) => action(e.target, async () => {
   await api("/admin/alerts/test", { method: "POST" });
   return "✅ Test alert sent to Telegram";
+});
+
+$("connect").onclick = (e) => action(e.target, async () => {
+  const r = await api("/admin/connect", { method: "POST" });
+  window.location.href = r.url;  // Instagram login, then back to /connect/callback
+  return "Opening Instagram…";
 });
 
 if (token) load(); else show(false);

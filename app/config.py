@@ -30,6 +30,11 @@ class Settings:
     graph_version: str = os.getenv("GRAPH_VERSION", "v23.0")
     graph_base: str = os.getenv("GRAPH_BASE", "https://graph.instagram.com")
 
+    # "Connect Instagram" OAuth flow (Instagram app id from the Meta dashboard)
+    ig_app_id: str = os.getenv("IG_APP_ID", "")
+    # Must be listed under "Valid OAuth Redirect URIs"; default: PUBLIC_URL + /connect/callback
+    oauth_redirect_uri: str = os.getenv("OAUTH_REDIRECT_URI", "")
+
     # Long-lived tokens expire after 60 days; the bot refreshes them on its own.
     token_auto_refresh: bool = os.getenv("TOKEN_AUTO_REFRESH", "true").lower() in ("1", "true", "yes")
     token_refresh_days_before: int = int(os.getenv("TOKEN_REFRESH_DAYS_BEFORE", "10"))
