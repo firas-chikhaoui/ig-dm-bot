@@ -105,9 +105,17 @@ def test_admin_token_status(monkeypatch, tmp_path):
 
 def test_admin_dashboard_and_activity(monkeypatch, tmp_path):
     c = make_client(monkeypatch, tmp_path)
+    r = c.get("/admin", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/admin/login")
+    # no password hash yet: ADMIN_TOKEN works as the login password
+    r = c.post("/admin/login", data={"password": "admin", "next": "/admin"},
+               follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/admin"
     page = c.get("/admin")
-    assert page.status_code == 200 and "ig-dm-bot" in page.text
+    assert page.status_code == 200 and "dashboard" in page.text and "tokenInput" not in page.text
     assert page.headers["x-frame-options"] == "DENY"
+    assert c.get("/admin/stats").status_code == 200  # the session cookie is enough
+    c.cookies.clear()
 
     assert c.get("/admin/activity").status_code == 401
     import app.main
@@ -148,7 +156,9 @@ def test_connect_instagram_endpoints(monkeypatch, tmp_path):
     importlib.reload(app.config)
     importlib.reload(app.main)
     c = TestClient(app.main.app)
-    assert c.get("/admin/connect").status_code == 401
+    r = c.get("/admin/connect", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/admin/login?next=/admin/connect"
+    assert c.post("/admin/connect").status_code == 401
     r = c.get("/admin/connect", params={"token": "admin"}, follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"].startswith("https://www.instagram.com/oauth/authorize?")

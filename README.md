@@ -205,7 +205,7 @@ git clone https://github.com/<you>/ig-dm-bot.git && cd ig-dm-bot
 cp .env.example .env && nano .env
 ```
 
-Fill in the Instagram values and set `DOMAIN=bot.yourdomain.com`, `PUBLIC_URL=https://bot.yourdomain.com`, `DRY_RUN=false`, and long random strings for `VERIFY_TOKEN` and `ADMIN_TOKEN` (`openssl rand -hex 24` makes one).
+Fill in the Instagram values and set `DOMAIN=bot.yourdomain.com`, `PUBLIC_URL=https://bot.yourdomain.com`, `DRY_RUN=false`, and long random strings for `VERIFY_TOKEN` and `ADMIN_TOKEN` (`openssl rand -hex 24` makes one), and your dashboard password hash as `ADMIN_PASSWORD_HASH` (see [Admin login](#admin-login)).
 
 **5. Start.**
 
@@ -285,9 +285,9 @@ One-time setup:
 
 1. In the Meta dashboard, open your app → **Instagram → API setup with Instagram login → 3. Set up Instagram business login → Business login settings**.
 2. Under **OAuth redirect URIs** add `https://YOUR-DOMAIN/connect/callback` and save.
-3. Copy the **Instagram app ID** shown on the same page into `.env` as `IG_APP_ID` (the matching **Instagram app secret** is your `APP_SECRET`). Make sure `PUBLIC_URL` and `ADMIN_TOKEN` are set, then restart.
+3. Copy the **Instagram app ID** shown on the same page into `.env` as `IG_APP_ID` (the matching **Instagram app secret** is your `APP_SECRET`). Make sure `PUBLIC_URL` and the admin login (`ADMIN_PASSWORD_HASH` or `ADMIN_TOKEN`) are set, then restart.
 
-Then open the dashboard and click **➕ Connect Instagram account** (or open `https://YOUR-DOMAIN/admin/connect?token=ADMIN_TOKEN`). Log in on Instagram, allow the three permissions, and you land on a confirmation page. The bot then:
+Then sign in to the dashboard and click **➕ Connect Instagram account** (or open `https://YOUR-DOMAIN/admin/connect`). Log in on Instagram, allow the three permissions, and you land on a confirmation page. The bot then:
 
 - exchanges the login code for a long-lived token (the token is never shown or logged),
 - stores the account with its id, username and expiry (connecting an existing account again just replaces its token; a paused account stays paused),
@@ -331,21 +331,36 @@ You get an alert for failed API calls, crashes while handling a comment or DM, a
 
 ## Dashboard
 
-Open `https://YOUR-DOMAIN/admin` and enter your `ADMIN_TOKEN`. The dashboard shows:
+Open `https://YOUR-DOMAIN/admin` and sign in with your admin password. The dashboard shows:
 
 - 📊 totals: flows started, comment replies, button clicks, emails, follow checks
 - 📈 flows started per day for the last 14 days, and your most used flows
 - 🔑 Instagram token health (days left, last refresh, last error)
 - buttons to download the email list as CSV, refresh the token, send a test alert and connect another Instagram account
 
-The token is kept only in that browser tab (session storage) and the page cannot be embedded in other sites. Without `ADMIN_TOKEN` in `.env` the dashboard is turned off.
+### Admin login
+
+The password is stored only as a hash. Create it once and paste the printed line into `.env`:
+
+```bash
+python -m app.auth                          # or: docker compose run --rm bot python -m app.auth
+# New admin password: ********
+# ADMIN_PASSWORD_HASH=pbkdf2_sha256:600000:...
+```
+
+Restart the bot (`docker compose up -d`). After signing in, the browser keeps an HttpOnly session cookie for `ADMIN_SESSION_HOURS` (default 12); **Log out** ends the session on the server. Five wrong passwords from one IP within 15 minutes block further tries for that IP (`LOGIN_MAX_ATTEMPTS`). Changing the password logs out every session. Requests from other websites are rejected and the pages cannot be embedded in other sites.
+
+While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as password (a warning is logged), so existing setups keep working. With neither set, the dashboard is turned off.
+
+`ADMIN_TOKEN` is still used by scripts and `curl` for the endpoints below, as `?token=ADMIN_TOKEN` or as a header `Authorization: Bearer ADMIN_TOKEN`. In the browser, the endpoints also work with the login session alone.
 
 ## Admin endpoints
 
 | Endpoint | |
 |---|---|
 | `GET /health` | Health check for uptime monitoring |
-| `GET /admin` | Dashboard page (asks for the admin token) |
+| `GET /admin` | Dashboard page (redirects to the login when signed out) |
+| `GET /admin/login`, `POST /admin/login`, `POST /admin/logout` | Dashboard sign in / sign out |
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
 | `GET /admin/activity?token=ADMIN_TOKEN&days=14` | Events per day and the most started flows |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
@@ -369,6 +384,7 @@ The token is kept only in that browser tab (session storage) and the page cannot
 app/
   main.py        web server: webhook + admin endpoints
   admin.html     admin dashboard (stats, token health, CSV export)
+  auth.py        admin login: password hash, session cookie, login rate limit
   bot.py         flow engine (comments, buttons, follow gate, email)
   rules.py       rules loader + validation: rules.yaml (hot reload) and rules per account
   instagram.py   Instagram API client

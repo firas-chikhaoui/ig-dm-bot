@@ -5,6 +5,7 @@ import csv
 import hashlib
 import hmac
 import io
+import ipaddress
 import asyncio
 import contextlib
 import json
@@ -13,12 +14,13 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, urlsplit
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from .alerts import setup_alerts
+from .auth import COOKIE_NAME, AdminAuth, login_page, safe_next
 from .config import settings
 from .oauth import CALLBACK_PATH, InstagramOAuth, OAuthError, result_page
 from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion_page,
@@ -43,6 +45,7 @@ tokens.seed()
 router = AccountRouter(settings, db, account_rules, tokens)
 bot = router.default  # the .env account (also drives the playground)
 oauth = InstagramOAuth(settings, db)  # "Connect Instagram"
+auth = AdminAuth(settings)  # dashboard login
 
 
 @asynccontextmanager
@@ -161,23 +164,141 @@ async def data_deletion_callback(request: Request):
     return {"url": f"{base}/data-deletion?code={code}", "confirmation_code": code}
 
 
-# --- Admin ---------------------------------------------------------------
-def _check_admin(token: str) -> None:
-    if not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
+_NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "same-origin",
+             "X-Frame-Options": "DENY"}
+
+
+# --- Admin login -----------------------------------------------------------
+# The dashboard uses a login (password hash + session cookie). Scripts and curl can
+# still use ADMIN_TOKEN: ?token=... or "Authorization: Bearer ...".
+_UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _same_origin(request: Request) -> bool:
+    """CSRF check for cookie sessions: a browser sends Origin on POST/PUT/DELETE."""
+    origin = request.headers.get("origin")
+    if not origin:
+        ref = request.headers.get("referer")
+        if not ref:
+            return True  # not a browser form/fetch from another site
+        origin = ref
+    host = request.headers.get("host", "")
+    return urlsplit(origin).netloc.lower() == host.lower()
+
+
+def _has_session(request: Request) -> bool:
+    return auth.verify_session(request.cookies.get(COOKIE_NAME, ""))
+
+
+def _is_admin(request: Request, token: str) -> bool:
+    bearer = request.headers.get("authorization", "")
+    if bearer[:7].lower() == "bearer ":
+        token = token or bearer[7:].strip()
+    if token:
+        return auth.check_token(token)
+    if _has_session(request):
+        if request.method in _UNSAFE and not _same_origin(request):
+            raise HTTPException(status_code=403, detail="cross-site request blocked")
+        return True
+    return False
+
+
+def require_admin(request: Request, token: str = Query("", include_in_schema=False)) -> None:
+    if not _is_admin(request, token):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-@app.get("/admin/stats")
-def stats(token: str = ""):
-    _check_admin(token)
+ADMIN = Depends(require_admin)
+
+
+def _client_ip(request: Request) -> str:
+    """The visitor's IP for the login rate limit. X-Forwarded-For is only trusted when the
+    request comes from a local/private address, i.e. from our Caddy reverse proxy."""
+    peer = request.client.host if request.client else "?"
+    try:
+        trusted = ipaddress.ip_address(peer).is_private  # includes loopback
+    except ValueError:
+        trusted = False
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return fwd if trusted and fwd else peer
+
+
+def _cookie_secure(request: Request) -> bool:
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        return True
+    pub = urlsplit(settings.public_url)
+    return pub.scheme == "https" and pub.netloc == request.headers.get("host", "")
+
+
+def _login_redirect(request: Request) -> RedirectResponse:
+    target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    return RedirectResponse(f"/admin/login?next={quote(safe_next(target))}", status_code=303,
+                            headers=_NO_STORE)
+
+
+def _require_login_enabled() -> None:
+    if not auth.enabled:
+        raise HTTPException(status_code=404, detail="set ADMIN_PASSWORD_HASH in .env "
+                                                    "(python -m app.auth) to use the dashboard")
+
+
+def _login_html(error: str = "", next_path: str = "/admin", status: int = 200) -> HTMLResponse:
+    page = login_page(error, next_path, using_token=not settings.admin_password_hash)
+    return HTMLResponse(page, status_code=status, headers=_NO_STORE)
+
+
+@app.get("/admin/login", response_class=HTMLResponse)
+def login_form(request: Request, next: str = "/admin"):  # noqa: A002
+    _require_login_enabled()
+    if _has_session(request):
+        return RedirectResponse(safe_next(next), status_code=303, headers=_NO_STORE)
+    return _login_html(next_path=safe_next(next))
+
+
+@app.post("/admin/login")
+async def login(request: Request):
+    _require_login_enabled()
+    raw = await request.body()
+    form = parse_qs(raw[:8192].decode("utf-8", "replace"))
+    password = form.get("password", [""])[0]
+    next_path = safe_next(form.get("next", ["/admin"])[0])
+    ip = _client_ip(request)
+    if not _same_origin(request):
+        return _login_html("Please try again.", next_path, 403)
+    if auth.blocked(ip):
+        log.warning("admin login blocked for %s: too many failed attempts", ip)
+        return _login_html("Too many failed attempts. Try again in 15 minutes.", next_path, 429)
+    if not auth.check_password(password):
+        auth.record_failure(ip)
+        log.warning("failed admin login from %s", ip)
+        return _login_html("Wrong password.", next_path, 401)
+    auth.reset_failures(ip)
+    log.info("admin logged in from %s", ip)
+    resp = RedirectResponse(next_path, status_code=303, headers=_NO_STORE)
+    resp.set_cookie(COOKIE_NAME, auth.create_session(), max_age=auth.session_seconds,
+                    path="/", httponly=True, samesite="strict", secure=_cookie_secure(request))
+    return resp
+
+
+@app.post("/admin/logout")
+def logout(request: Request):
+    if _same_origin(request):
+        auth.revoke(request.cookies.get(COOKIE_NAME, ""))
+    resp = RedirectResponse("/admin/login", status_code=303, headers=_NO_STORE)
+    resp.delete_cookie(COOKIE_NAME, path="/")
+    return resp
+
+
+# --- Admin -----------------------------------------------------------------
+@app.get("/admin/stats", dependencies=[ADMIN])
+def stats():
     r = bot.rules.get()
     return {"stats": db.stats(), "reels": len(r.reels), "flows": list(r.flows)}
 
 
-@app.get("/admin/activity")
-def activity(token: str = "", days: int = Query(14, ge=1, le=90)):
+@app.get("/admin/activity", dependencies=[ADMIN])
+def activity(days: int = Query(14, ge=1, le=90)):
     """Events per day and the most started flows, for the dashboard chart."""
-    _check_admin(token)
     return {"days": db.daily_activity(days), "top_flows": db.top_flows()}
 
 
@@ -185,13 +306,14 @@ ADMIN_HTML = Path(__file__).with_name("admin.html")
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_page():
-    """Dashboard page. It asks for the admin token in the browser; no data without it."""
-    if not settings.admin_token:
-        raise HTTPException(status_code=404, detail="set ADMIN_TOKEN in .env to use the dashboard")
+def admin_page(request: Request):
+    """Dashboard page. Without a login session the browser goes to /admin/login."""
+    _require_login_enabled()
+    if not _has_session(request):
+        return _login_redirect(request)
     return HTMLResponse(ADMIN_HTML.read_text(encoding="utf-8"),
                         headers={"X-Frame-Options": "DENY", "Cache-Control": "no-store",
-                                 "Referrer-Policy": "no-referrer"})
+                                 "Referrer-Policy": "same-origin"})
 
 
 def _token_manager(account: str | None) -> TokenManager:
@@ -203,16 +325,14 @@ def _token_manager(account: str | None) -> TokenManager:
     return tokens.for_account(account)
 
 
-@app.get("/admin/token")
-def token_status(token: str = "", account: str | None = None):
+@app.get("/admin/token", dependencies=[ADMIN])
+def token_status(account: str | None = None):
     """Expiry and refresh status of an Instagram token (the token itself is never shown)."""
-    _check_admin(token)
     return _token_manager(account).status()
 
 
-@app.post("/admin/token/refresh")
-def token_refresh(token: str = "", account: str | None = None):
-    _check_admin(token)
+@app.post("/admin/token/refresh", dependencies=[ADMIN])
+def token_refresh(account: str | None = None):
     tm = _token_manager(account)
     if settings.dry_run:
         raise HTTPException(status_code=409, detail="not available in DRY_RUN")
@@ -220,10 +340,9 @@ def token_refresh(token: str = "", account: str | None = None):
     return {"refreshed": ok, **tm.status()}
 
 
-@app.get("/admin/accounts")
-def accounts(token: str = ""):
+@app.get("/admin/accounts", dependencies=[ADMIN])
+def accounts():
     """All connected Instagram accounts with token health (tokens are never shown)."""
-    _check_admin(token)
     ids = [r["ig_user_id"] for r in db.list_accounts()]
     if tokens.account_id not in ids and tokens.current():
         ids.insert(0, tokens.account_id)  # .env token not stored yet
@@ -233,8 +352,6 @@ def accounts(token: str = ""):
 
 
 # --- Connect Instagram (OAuth) ---------------------------------------------
-_NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-             "X-Frame-Options": "DENY"}
 
 
 def _connect_url(request: Request) -> str:
@@ -247,16 +364,18 @@ def _connect_url(request: Request) -> str:
 
 
 @app.get("/admin/connect")
-def connect_start(request: Request, token: str = ""):
+def connect_start(request: Request, token: str = Query("", include_in_schema=False)):
     """Send the browser to Instagram's login to connect (or reconnect) an account."""
-    _check_admin(token)
+    if not _is_admin(request, token):
+        if auth.enabled:
+            return _login_redirect(request)
+        raise HTTPException(status_code=401, detail="unauthorized")
     return RedirectResponse(_connect_url(request), status_code=302, headers=_NO_STORE)
 
 
-@app.post("/admin/connect")
-def connect_url(request: Request, token: str = ""):
+@app.post("/admin/connect", dependencies=[ADMIN])
+def connect_url(request: Request):
     """Same as GET, but returns the Instagram login URL as JSON (used by the dashboard)."""
-    _check_admin(token)
     return {"url": _connect_url(request)}
 
 
@@ -289,11 +408,10 @@ def _rules_account(account: str | None) -> str:
     return account
 
 
-@app.get("/admin/rules")
-def rules_export(token: str = "", account: str | None = None):
+@app.get("/admin/rules", dependencies=[ADMIN])
+def rules_export(account: str | None = None):
     """An account's rules as YAML: its stored rules, or rules.yaml when it has none.
     The X-Rules-Source header says which ("database" or "file")."""
-    _check_admin(token)
     acc = _rules_account(account)
     return PlainTextResponse(account_rules.export_yaml(acc), media_type="text/yaml",
                              headers={"X-Rules-Source": account_rules.source(acc),
@@ -311,10 +429,9 @@ async def _yaml_body(request: Request) -> str:
         raise HTTPException(status_code=400, detail="rules must be UTF-8 text")
 
 
-@app.post("/admin/rules/validate")
-async def rules_validate(request: Request, token: str = ""):
+@app.post("/admin/rules/validate", dependencies=[ADMIN])
+async def rules_validate(request: Request):
     """Check YAML rules without saving them."""
-    _check_admin(token)
     try:
         r = parse_rules_yaml(await _yaml_body(request))
     except RulesError as e:
@@ -322,11 +439,10 @@ async def rules_validate(request: Request, token: str = ""):
     return {"valid": True, "reels": len(r.reels), "flows": list(r.flows)}
 
 
-@app.put("/admin/rules")
-async def rules_import(request: Request, token: str = "", account: str | None = None):
+@app.put("/admin/rules", dependencies=[ADMIN])
+async def rules_import(request: Request, account: str | None = None):
     """Validate YAML rules and store them for one account (default: the .env account).
     Invalid rules are rejected with 400 and the live rules stay unchanged."""
-    _check_admin(token)
     acc = _rules_account(account)
     try:
         r = account_rules.import_yaml(acc, await _yaml_body(request))
@@ -335,18 +451,16 @@ async def rules_import(request: Request, token: str = "", account: str | None = 
     return {"saved": True, "account": acc, "reels": len(r.reels), "flows": list(r.flows)}
 
 
-@app.delete("/admin/rules")
-def rules_reset(token: str = "", account: str | None = None):
+@app.delete("/admin/rules", dependencies=[ADMIN])
+def rules_reset(account: str | None = None):
     """Delete an account's stored rules; it uses rules.yaml again."""
-    _check_admin(token)
     acc = _rules_account(account)
     return {"deleted": account_rules.reset(acc), "account": acc, "source": "file"}
 
 
-@app.post("/admin/alerts/test")
-def alerts_test(token: str = ""):
+@app.post("/admin/alerts/test", dependencies=[ADMIN])
+def alerts_test():
     """Send a test message to the Telegram chat to check the alert setup."""
-    _check_admin(token)
     if alerts is None:
         raise HTTPException(status_code=409,
                             detail="Telegram alerts are off: set TELEGRAM_BOT_TOKEN and "
@@ -357,9 +471,8 @@ def alerts_test(token: str = ""):
     return {"sent": True}
 
 
-@app.get("/admin/emails.csv")
-def emails_csv(token: str = "", list: str | None = None):  # noqa: A002
-    _check_admin(token)
+@app.get("/admin/emails.csv", dependencies=[ADMIN])
+def emails_csv(list: str | None = None):  # noqa: A002
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["email", "username", "user_id", "list", "flow", "created_at"])
@@ -370,10 +483,9 @@ def emails_csv(token: str = "", list: str | None = None):  # noqa: A002
                     headers={"Content-Disposition": "attachment; filename=emails.csv"})
 
 
-@app.delete("/admin/users/{user_id}")
-def admin_delete_user(user_id: str, token: str = ""):
+@app.delete("/admin/users/{user_id}", dependencies=[ADMIN])
+def admin_delete_user(user_id: str):
     """Delete everything stored about one Instagram user (e.g. after an email request)."""
-    _check_admin(token)
     code, rows = delete_user(db, user_id, "admin")
     log.info("admin deleted data of user %s (%d rows, code %s)", user_id, rows, code)
     return {"deleted_rows": rows, "confirmation_code": code}

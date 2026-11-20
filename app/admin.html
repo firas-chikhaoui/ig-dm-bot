@@ -40,8 +40,6 @@
   th { color:var(--muted); font-weight:500; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:8px; }
   .muted { color:var(--muted); font-size:13px; }
-  #login { max-width:380px; margin:12vh auto; }
-  #login p { color:var(--muted); font-size:14px; }
   #msg { margin-left:8px; font-size:13px; color:var(--muted); }
   .hidden { display:none !important; }
 </style>
@@ -50,20 +48,11 @@
 <header>
   <h1>📩 ig-dm-bot <span>· dashboard</span></h1>
   <span id="updated" class="muted"></span>
-  <button id="reload" class="hidden">↻ Refresh</button>
-  <button id="logout" class="hidden">Log out</button>
+  <button id="reload">↻ Refresh</button>
+  <form method="post" action="/admin/logout" style="margin:0"><button id="logout" type="submit">Log out</button></form>
 </header>
 
-<div id="login" class="card">
-  <h3 style="margin-top:0">Sign in</h3>
-  <p>Enter the <code>ADMIN_TOKEN</code> from your <code>.env</code>. It stays in this browser tab only.</p>
-  <form id="loginForm"><input id="tokenInput" type="password" autocomplete="current-password"
-    placeholder="Admin token" autofocus>
-  <div style="margin-top:12px"><button class="primary" type="submit">Open dashboard</button>
-  <span id="loginErr" class="muted" style="color:var(--bad)"></span></div></form>
-</div>
-
-<main id="app" class="hidden">
+<main id="app">
   <div class="grid" id="kpis"></div>
 
   <h2>Activity · last 14 days</h2>
@@ -92,34 +81,19 @@
 </main>
 
 <script>
-const KEY = "igdm_admin_token";
-let token = "";
-try { token = sessionStorage.getItem(KEY) || ""; } catch (e) {}
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+// The session cookie (HttpOnly) is sent automatically; it expires or you log out -> login page.
+function toLogin() { window.location.href = "/admin/login?next=/admin"; }
+
 async function api(path, opts = {}) {
-  const sep = path.includes("?") ? "&" : "?";
-  const r = await fetch(`${path}${sep}token=${encodeURIComponent(token)}`, opts);
-  if (r.status === 401) { logout("Wrong token"); throw new Error("unauthorized"); }
+  const r = await fetch(path, { credentials: "same-origin", ...opts });
+  if (r.status === 401) { toLogin(); throw new Error("unauthorized"); }
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
   return body;
-}
-
-function show(loggedIn) {
-  $("login").classList.toggle("hidden", loggedIn);
-  $("app").classList.toggle("hidden", !loggedIn);
-  $("reload").classList.toggle("hidden", !loggedIn);
-  $("logout").classList.toggle("hidden", !loggedIn);
-}
-
-function logout(err) {
-  token = "";
-  try { sessionStorage.removeItem(KEY); } catch (e) {}
-  $("loginErr").textContent = err || "";
-  show(false);
 }
 
 const KPIS = [
@@ -167,7 +141,6 @@ function renderToken(t) {
 async function load() {
   try {
     const [s, a, t] = await Promise.all([api("/admin/stats"), api("/admin/activity"), api("/admin/token")]);
-    show(true);
     renderStats(s); renderActivity(a); renderToken(t);
     $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) {
@@ -181,18 +154,10 @@ async function action(btn, fn) {
   btn.disabled = false;
 }
 
-$("loginForm").addEventListener("submit", (e) => {
-  e.preventDefault();
-  token = $("tokenInput").value.trim();
-  if (!token) return;
-  try { sessionStorage.setItem(KEY, token); } catch (err) {}
-  $("tokenInput").value = "";
-  load();
-});
-$("logout").onclick = () => logout();
 $("reload").onclick = load;
 $("csv").onclick = async () => {
-  const r = await fetch(`/admin/emails.csv?token=${encodeURIComponent(token)}`);
+  const r = await fetch("/admin/emails.csv", { credentials: "same-origin" });
+  if (r.status === 401) { toLogin(); return; }
   if (!r.ok) { $("msg").textContent = "⚠ download failed"; return; }
   const url = URL.createObjectURL(await r.blob());
   const a = Object.assign(document.createElement("a"), { href: url, download: "emails.csv" });
@@ -214,8 +179,8 @@ $("connect").onclick = (e) => action(e.target, async () => {
   return "Opening Instagram…";
 });
 
-if (token) load(); else show(false);
-setInterval(() => { if (token && !document.hidden) load(); }, 60000);
+load();
+setInterval(() => { if (!document.hidden) load(); }, 60000);
 </script>
 </body>
 </html>

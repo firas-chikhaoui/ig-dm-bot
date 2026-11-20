@@ -54,7 +54,11 @@ class Settings:
     # App
     rules_path: str = os.getenv("RULES_PATH", "rules.yaml")
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
-    admin_token: str = os.getenv("ADMIN_TOKEN", "")  # protects /admin endpoints
+    admin_token: str = os.getenv("ADMIN_TOKEN", "")  # for scripts/curl on /admin endpoints
+    # Dashboard login: PBKDF2 hash of the admin password (create it with `python -m app.auth`)
+    admin_password_hash: str = os.getenv("ADMIN_PASSWORD_HASH", "")
+    admin_session_hours: float = float(os.getenv("ADMIN_SESSION_HOURS", "12"))
+    login_max_attempts: int = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))  # per IP / 15 min
     dry_run: bool = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
     # In DRY_RUN, pretend the user follows you (true) or not (false) to test the follow gate
     dry_run_follows: bool = os.getenv("DRY_RUN_FOLLOWS", "true").lower() in ("1", "true", "yes")

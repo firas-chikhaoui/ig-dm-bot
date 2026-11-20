@@ -71,9 +71,10 @@ class InstagramOAuth:
 
     # --- configuration ---------------------------------------------------
     def missing_config(self) -> list[str]:
+        admin = self.s.admin_token or self.s.admin_password_hash
         missing = [name for name, value in (("IG_APP_ID", self.s.ig_app_id),
                                             ("APP_SECRET", self.s.app_secret),
-                                            ("ADMIN_TOKEN", self.s.admin_token)) if not value]
+                                            ("ADMIN_TOKEN", admin)) if not value]
         return missing
 
     def redirect_uri(self, base_url: str = "") -> str:
@@ -86,7 +87,8 @@ class InstagramOAuth:
     # --- state (CSRF protection) ----------------------------------------
     def _key(self) -> bytes:
         return hashlib.sha256(
-            f"oauth-state|{self.s.app_secret}|{self.s.admin_token}".encode()).digest()
+            f"oauth-state|{self.s.app_secret}|{self.s.admin_token}|"
+            f"{self.s.admin_password_hash}".encode()).digest()
 
     def _sign(self, msg: str) -> str:
         return hmac.new(self._key(), msg.encode(), hashlib.sha256).hexdigest()[:32]
