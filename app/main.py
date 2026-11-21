@@ -29,6 +29,7 @@ from .router import AccountRouter
 from .rules import AccountRulesStore, RulesError, RulesStore, parse_rules_yaml
 from .storage import Storage
 from .tokens import TokenManager
+from .tokens import health as token_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
@@ -340,15 +341,45 @@ def token_refresh(account: str | None = None):
     return {"refreshed": ok, **tm.status()}
 
 
+def _account_info(account_id: str, row=None) -> dict:
+    """One row of the dashboard's client list (the token itself is never included)."""
+    st = tokens.for_account(account_id).status()
+    code, label = token_health(st)
+    return {**st, "rules": account_rules.source(account_id), "health": code,
+            "health_label": label, "is_default": account_id == tokens.account_id,
+            "connected_at": datetime.fromtimestamp(row["created_at"], timezone.utc).isoformat()
+            if row else None}
+
+
 @app.get("/admin/accounts", dependencies=[ADMIN])
 def accounts():
-    """All connected Instagram accounts with token health (tokens are never shown)."""
-    ids = [r["ig_user_id"] for r in db.list_accounts()]
-    if tokens.account_id not in ids and tokens.current():
-        ids.insert(0, tokens.account_id)  # .env token not stored yet
-    return {"accounts": [{**tokens.for_account(i).status(), "rules": account_rules.source(i)}
-                         for i in ids],
-            "default": tokens.account_id}
+    """All connected Instagram accounts with status and token health."""
+    rows = db.list_accounts()
+    items = [_account_info(r["ig_user_id"], r) for r in rows]
+    if tokens.account_id not in {r["ig_user_id"] for r in rows} and tokens.current():
+        items.insert(0, _account_info(tokens.account_id))  # .env token not stored yet
+    counts: dict[str, int] = {}
+    for a in items:
+        counts[a["health"]] = counts.get(a["health"], 0) + 1
+    return {"accounts": items, "default": tokens.account_id, "summary": counts}
+
+
+def _set_active(account_id: str, active: bool) -> dict:
+    if not db.set_account_active(account_id, active):
+        raise HTTPException(status_code=404, detail="unknown account")
+    log.info("account %s %s from the dashboard", account_id, "resumed" if active else "paused")
+    return _account_info(account_id, db.get_account(account_id))
+
+
+@app.post("/admin/accounts/{account_id}/pause", dependencies=[ADMIN])
+def account_pause(account_id: str):
+    """Stop answering comments/DMs and refreshing the token of one account."""
+    return _set_active(account_id, False)
+
+
+@app.post("/admin/accounts/{account_id}/resume", dependencies=[ADMIN])
+def account_resume(account_id: str):
+    return _set_active(account_id, True)
 
 
 # --- Connect Instagram (OAuth) ---------------------------------------------

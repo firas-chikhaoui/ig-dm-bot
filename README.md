@@ -335,8 +335,21 @@ Open `https://YOUR-DOMAIN/admin` and sign in with your admin password. The dashb
 
 - 📊 totals: flows started, comment replies, button clicks, emails, follow checks
 - 📈 flows started per day for the last 14 days, and your most used flows
-- 🔑 Instagram token health (days left, last refresh, last error)
-- buttons to download the email list as CSV, refresh the token, send a test alert and connect another Instagram account
+- 👥 every connected Instagram account: username and ID, status, token expiry and last refresh, and whether it uses its own rules or `rules.yaml`
+- per account: **⏸ Pause / ▶ Resume** and **🔑** to refresh its token now
+- buttons to download the email list as CSV, send a test alert and connect another Instagram account
+
+The status of an account is one of:
+
+| Status | Meaning |
+|---|---|
+| 🟢 Active | The bot answers comments and DMs of this account |
+| 🟡 Expires soon | Fewer than 10 days left on the token; the bot keeps trying to refresh it |
+| 🔴 Refresh failed | The last token refresh failed (hover for the error). Normal for a few hours after adding a brand-new token |
+| 🔴 Token expired | Reconnect the account (➕ Connect Instagram account) or put a new token in `.env` |
+| ⚪ Paused | Webhook events of this account are ignored and its token is not refreshed. Resume it any time; nothing is lost |
+
+Pausing is also available as `python scripts/accounts.py pause <id>` and over HTTP (below). Accounts that only exist in `.env` and not in the database yet can't be paused; they are stored on the first start with `IG_ACCESS_TOKEN` set.
 
 ### Admin login
 
@@ -364,7 +377,8 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
 | `GET /admin/activity?token=ADMIN_TOKEN&days=14` | Events per day and the most started flows |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
-| `GET /admin/accounts?token=ADMIN_TOKEN` | Stored Instagram accounts with token health |
+| `GET /admin/accounts?token=ADMIN_TOKEN` | Connected Instagram accounts with status (`health`) and token health |
+| `POST /admin/accounts/<id>/pause?token=ADMIN_TOKEN` | Pauses an account (its events are ignored); `/resume` turns it back on |
 | `GET /admin/token?token=ADMIN_TOKEN&account=ID` | Token expiry, last refresh and last error (`account` optional, default: the `.env` account) |
 | `POST /admin/token/refresh?token=ADMIN_TOKEN&account=ID` | Refreshes a token now |
 | `GET /admin/rules?token=ADMIN_TOKEN&account=ID` | An account's rules as YAML; header `X-Rules-Source` is `database` or `file` |
@@ -383,7 +397,7 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 ```
 app/
   main.py        web server: webhook + admin endpoints
-  admin.html     admin dashboard (stats, token health, CSV export)
+  admin.html     admin dashboard (stats, connected accounts, pause/resume, CSV export)
   auth.py        admin login: password hash, session cookie, login rate limit
   bot.py         flow engine (comments, buttons, follow gate, email)
   rules.py       rules loader + validation: rules.yaml (hot reload) and rules per account
@@ -406,7 +420,8 @@ tests/
 
 ## Roadmap
 
-- [x] Web dashboard to see stats, token health and export emails
+- [x] Web dashboard to see stats, connected accounts and export emails
+- [x] Pause and resume accounts from the dashboard
 - [ ] Edit rules from the dashboard
 - [x] Multiple Instagram accounts
 - [ ] Send waitlist emails to a newsletter tool (Mailchimp, Brevo, etc.)

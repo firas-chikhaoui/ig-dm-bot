@@ -42,6 +42,11 @@
   .muted { color:var(--muted); font-size:13px; }
   #msg { margin-left:8px; font-size:13px; color:var(--muted); }
   .hidden { display:none !important; }
+  .tag { display:inline-block; font-size:11px; color:var(--muted); border:1px solid var(--line);
+         border-radius:6px; padding:1px 6px; margin-left:6px; }
+  .acts { white-space:nowrap; text-align:right; } .acts button { padding:5px 10px; }
+  .scroll { overflow-x:auto; }
+  #accounts td { vertical-align:middle; }
 </style>
 </head>
 <body>
@@ -59,21 +64,18 @@
   <div class="card"><div class="chart" id="chart"></div>
     <div class="muted" style="margin-top:8px">Flows started per day</div></div>
 
-  <div class="row">
-    <div>
-      <h2>Top flows</h2>
-      <div class="card"><table id="flows"><tr><th>Flow</th><th>Started</th></tr></table></div>
-    </div>
-    <div>
-      <h2>Instagram token</h2>
-      <div class="card" id="token"></div>
-    </div>
+  <h2>Instagram accounts <span id="accSummary" style="text-transform:none;letter-spacing:0"></span></h2>
+  <div class="card scroll">
+    <table id="accounts"><tr><td class="muted">Loading…</td></tr></table>
+    <div id="accMsg" class="muted" style="margin-top:8px"></div>
   </div>
+
+  <h2>Top flows</h2>
+  <div class="card"><table id="flows"><tr><th>Flow</th><th>Started</th></tr></table></div>
 
   <h2>Actions</h2>
   <div class="card">
     <button id="csv">⬇ Download emails (CSV)</button>
-    <button id="refreshToken">🔑 Refresh token now</button>
     <button id="testAlert">🚨 Send test alert</button>
     <button id="connect">➕ Connect Instagram account</button>
     <span id="msg"></span>
@@ -123,34 +125,73 @@ function renderActivity(a) {
     (rows || `<tr><td colspan="2" class="muted">No flows started yet</td></tr>`);
 }
 
-function renderToken(t) {
-  let color = "var(--ok)", label = "Healthy";
-  if (!t.configured) { color = "var(--bad)"; label = "Not configured"; }
-  else if (t.last_error) { color = "var(--bad)"; label = "Refresh failed"; }
-  else if (t.days_left !== null && t.days_left < 10) { color = "var(--warn)"; label = "Expires soon"; }
-  $("token").innerHTML = `<div><span class="dot" style="background:${color}"></span><b>${label}</b></div>
-    <table style="margin-top:8px">
-      <tr><td class="muted">Days left</td><td>${t.days_left ?? "unknown"}</td></tr>
-      <tr><td class="muted">Expires</td><td>${esc(t.expires_at ?? "unknown")}</td></tr>
-      <tr><td class="muted">Last refresh</td><td>${esc(t.refreshed_at ?? "never")}</td></tr>
-      <tr><td class="muted">Auto refresh</td><td>${t.auto_refresh ? "on" : "off"}</td></tr>
-      ${t.last_error ? `<tr><td class="muted">Last error</td><td>${esc(t.last_error)}</td></tr>` : ""}
-    </table>`;
+const HEALTH_COLOR = { ok: "var(--ok)", expiring: "var(--warn)", paused: "var(--muted)",
+  error: "var(--bad)", expired: "var(--bad)", missing: "var(--bad)" };
+
+function fmtDate(iso) { return iso ? new Date(iso).toLocaleDateString() : "unknown"; }
+
+function renderAccounts(d) {
+  const head = `<tr><th>Account</th><th>Status</th><th>Token</th><th>Rules</th><th></th></tr>`;
+  const rows = d.accounts.map(a => {
+    const name = a.username ? "@" + esc(a.username) : esc(a.account_id);
+    const days = a.days_left === null ? "expiry unknown"
+      : a.days_left <= 0 ? "expired" : `${Math.floor(a.days_left)} days left`;
+    const when = [a.expires_at ? "until " + fmtDate(a.expires_at) : "",
+                  a.refreshed_at ? "refreshed " + fmtDate(a.refreshed_at) : ""].filter(Boolean).join(" · ");
+    const token = `${days}${when ? `<div class="muted">${esc(when)}</div>` : ""}`;
+    const err = a.last_error ? `<div class="muted" title="${esc(a.last_error)}">⚠ ${esc(a.last_error.slice(0, 60))}</div>` : "";
+    const toggle = a.source === "database"
+      ? (a.active ? `<button data-act="pause" data-id="${esc(a.account_id)}">⏸ Pause</button>`
+                  : `<button data-act="resume" data-id="${esc(a.account_id)}" class="primary">▶ Resume</button>`)
+      : "";
+    return `<tr>
+      <td><b>${name}</b>${a.is_default ? '<span class="tag">.env</span>' : ""}
+        <div class="muted">ID ${esc(a.account_id)}${a.connected_at ? " · since " + esc(fmtDate(a.connected_at)) : ""}</div></td>
+      <td><span class="dot" style="background:${HEALTH_COLOR[a.health] || "var(--muted)"}"></span>${esc(a.health_label)}${err}</td>
+      <td>${token}</td>
+      <td>${a.rules === "database" ? "own rules" : "rules.yaml"}</td>
+      <td class="acts">${toggle}
+        <button data-act="refresh" data-id="${esc(a.account_id)}" ${a.active ? "" : "disabled"} title="Refresh the token now">🔑</button></td>
+    </tr>`;
+  }).join("");
+  $("accounts").innerHTML = head + (rows ||
+    `<tr><td colspan="5" class="muted">No account yet. Set IG_ACCESS_TOKEN in .env or click ➕ Connect Instagram account.</td></tr>`);
+  const n = d.accounts.length, paused = d.summary.paused || 0;
+  const issues = (d.summary.error || 0) + (d.summary.expired || 0) + (d.summary.missing || 0) + (d.summary.expiring || 0);
+  $("accSummary").textContent = `· ${n} connected` + (paused ? ` · ${paused} paused` : "") +
+    (issues ? ` · ${issues} need attention` : "");
 }
+
+async function accountAction(btn) {
+  const id = btn.dataset.id, act = btn.dataset.act;
+  if (act === "pause" && !confirm(`Pause account ${id}? The bot stops answering its comments and DMs until you resume it.`)) return;
+  await action(btn, async () => {
+    if (act === "refresh") {
+      const r = await api(`/admin/token/refresh?account=${encodeURIComponent(id)}`, { method: "POST" });
+      await loadAccounts();
+      return r.refreshed ? "✅ Token refreshed" : "⚠ Refresh failed, see logs";
+    }
+    await api(`/admin/accounts/${encodeURIComponent(id)}/${act}`, { method: "POST" });
+    await loadAccounts();
+    return act === "pause" ? `⏸ Account ${id} paused` : `▶ Account ${id} resumed`;
+    }, $("accMsg"));
+}
+
+async function loadAccounts() { renderAccounts(await api("/admin/accounts")); }
 
 async function load() {
   try {
-    const [s, a, t] = await Promise.all([api("/admin/stats"), api("/admin/activity"), api("/admin/token")]);
-    renderStats(s); renderActivity(a); renderToken(t);
+    const [s, a, acc] = await Promise.all([api("/admin/stats"), api("/admin/activity"), api("/admin/accounts")]);
+    renderStats(s); renderActivity(a); renderAccounts(acc);
     $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) {
     if (e.message !== "unauthorized") $("updated").textContent = "⚠ " + e.message;
   }
 }
 
-async function action(btn, fn) {
-  btn.disabled = true; $("msg").textContent = "…";
-  try { $("msg").textContent = await fn(); } catch (e) { $("msg").textContent = "⚠ " + e.message; }
+async function action(btn, fn, out = $("msg")) {
+  btn.disabled = true; out.textContent = "…";
+  try { out.textContent = await fn(); } catch (e) { out.textContent = "⚠ " + e.message; }
   btn.disabled = false;
 }
 
@@ -163,11 +204,10 @@ $("csv").onclick = async () => {
   const a = Object.assign(document.createElement("a"), { href: url, download: "emails.csv" });
   a.click(); URL.revokeObjectURL(url);
 };
-$("refreshToken").onclick = (e) => action(e.target, async () => {
-  const r = await api("/admin/token/refresh", { method: "POST" });
-  renderToken(r);
-  return r.refreshed ? "✅ Token refreshed" : "⚠ Refresh failed, see logs";
-});
+$("accounts").onclick = (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (btn && !btn.disabled) accountAction(btn);
+};
 $("testAlert").onclick = (e) => action(e.target, async () => {
   await api("/admin/alerts/test", { method: "POST" });
   return "✅ Test alert sent to Telegram";

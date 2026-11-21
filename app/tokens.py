@@ -38,6 +38,26 @@ def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
 
 
+SOON_DAYS = 10  # the dashboard marks tokens with fewer days left as "expires soon"
+
+
+def health(status: dict[str, Any]) -> tuple[str, str]:
+    """Short state of an account for the dashboard, from TokenManager.status():
+    (code, label) with code one of missing, paused, expired, error, expiring, ok."""
+    left = status.get("days_left")
+    if not status.get("configured"):
+        return "missing", "Not configured"
+    if not status.get("active"):
+        return "paused", "Paused"
+    if left is not None and left <= 0:
+        return "expired", "Token expired"
+    if status.get("last_error"):
+        return "error", "Refresh failed"
+    if left is not None and left < SOON_DAYS:
+        return "expiring", "Expires soon"
+    return "ok", "Active"
+
+
 def env_account_id(settings: Settings) -> str:
     """Key of the account configured in .env (IG_USER_ID)."""
     return settings.ig_user_id or DEFAULT_ACCOUNT
