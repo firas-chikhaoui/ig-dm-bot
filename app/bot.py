@@ -42,11 +42,22 @@ def render(text: str, **ctx: Any) -> str:
 
 
 class Bot:
-    def __init__(self, api: InstagramAPI, rules: RulesStore | AccountRules, db: Storage, own_id: str = ""):
+    def __init__(self, api: InstagramAPI, rules: RulesStore | AccountRules, db: Storage,
+                 own_id: str = "", account_id: str | None = None):
         self.api = api
         self.rules = rules
         self.db = db
         self.own_id = own_id
+        self.account_id = account_id  # stats and emails are stored per account
+
+    def _log(self, user_id: str | None, kind: str, detail: str = "") -> None:
+        self.db.log_event(user_id, kind, detail, account_id=self.account_id)
+
+    def _dm(self, recipient: dict[str, str], message: dict[str, Any]) -> None:
+        """Send a DM and count it for the stats. No user id is logged: the reply to a
+        "delete my data" request must not leave a new row about that person."""
+        self.api.send(recipient, message)
+        self._log(None, "dm_sent")
 
     # ------------------------------------------------------------------
     # Webhook entry point
@@ -99,13 +110,13 @@ class Bot:
         if reply:
             try:
                 self.api.reply_to_comment(comment_id, render(reply, username=username))
-                self.db.log_event(user_id, "comment_reply", comment_id)
+                self._log(user_id, "comment_reply", comment_id)
             except Exception:
                 log.exception("public comment reply failed")
 
         self.db.set_state(user_id, rule.flow, None, username=username)
         self.db.reset_follow_failures(user_id, rule.flow)
-        self.db.log_event(user_id, "flow_started", rule.flow)
+        self._log(user_id, "flow_started", rule.flow)
         # First DM must be a "private reply" to the comment.
         self.run_step(user_id, rule.flow, rules.flows[rule.flow]["start"], username,
                       via_comment=comment_id)
@@ -135,7 +146,7 @@ class Bot:
         target = parse_payload(payload)
         if target:
             flow, step = target
-            self.db.log_event(sender, "button", f"{flow}/{step}")
+            self._log(sender, "button", f"{flow}/{step}")
             self.run_step(sender, flow, step, username)
             return
 
@@ -159,7 +170,7 @@ class Bot:
             rules = self.rules.get()
             self.db.set_state(sender, trig.flow, None)
             self.db.reset_follow_failures(sender, trig.flow)
-            self.db.log_event(sender, "flow_started", trig.flow)
+            self._log(sender, "flow_started", trig.flow)
             self.run_step(sender, trig.flow, rules.flows[trig.flow]["start"], username)
 
     def _handle_delete_request(self, user_id: str, text: str) -> bool:
@@ -169,7 +180,7 @@ class Bot:
             return False
         code, rows = delete_user(self.db, user_id, "dm")
         log.info("deleted data of user %s on request (%d rows, code %s)", user_id, rows, code)
-        self.db.log_event(None, "data_deleted", "dm")
+        self._log(None, "data_deleted", "dm")
         self._send(user_id, cfg.get("reply", DEFAULT_DELETE_REPLY), code=code)
         return True
 
@@ -185,9 +196,10 @@ class Bot:
             self._send(user_id, cfg.get("invalid", "Hmm, that doesn't look like an email. "
                                                    "Can you send it again?"), username=username)
             return True
-        self.db.save_email(user_id, username, candidate.lower(), cfg.get("list", "waitlist"), flow)
+        self.db.save_email(user_id, username, candidate.lower(), cfg.get("list", "waitlist"), flow,
+                           account_id=self.account_id)
         self.db.set_state(user_id, flow, None)
-        self.db.log_event(user_id, "email_collected", cfg.get("list", "waitlist"))
+        self._log(user_id, "email_collected", cfg.get("list", "waitlist"))
         if cfg.get("success"):
             self._send(user_id, cfg["success"], username=username, email=candidate)
         if cfg.get("next"):
@@ -215,7 +227,7 @@ class Bot:
             buttons = step.get("buttons") or []
             text = render(step["message"], username=username)
             msg = self.api.build_message(text, buttons, lambda nxt: make_payload(flow, nxt))
-            self.api.send(recipient(), msg)
+            self._dm(recipient(), msg)
             self.db.set_state(user_id, flow, None)
             nxt = step.get("next")
             if nxt and not buttons:
@@ -237,7 +249,7 @@ class Bot:
                 [{"title": opener.get("button", "Continue"), "next": step_name}],
                 lambda nxt: make_payload(flow, nxt),
             )
-            self.api.send(recipient(), msg)
+            self._dm(recipient(), msg)
             return
 
         if "require_follow" in step:
@@ -260,7 +272,7 @@ class Bot:
         over max_retries  -> gave_up once (if set), then silence
         """
         following = self.api.is_following(user_id)
-        self.db.log_event(user_id, "follow_check", "yes" if following else "no")
+        self._log(user_id, "follow_check", "yes" if following else "no")
         if following:
             self.db.reset_follow_failures(user_id, flow)
             return rf["ok"]
@@ -275,9 +287,9 @@ class Bot:
         if attempts - 1 == int(limit) + 1:
             log.info("user %s: follow check retry limit (%s) reached in flow %s",
                      user_id, limit, flow)
-            self.db.log_event(user_id, "follow_gave_up", flow)
+            self._log(user_id, "follow_gave_up", flow)
             return rf.get("gave_up")
         return None  # already told them; don't keep messaging
 
     def _send(self, user_id: str, text: str, **ctx: Any) -> None:
-        self.api.send({"id": user_id}, {"text": render(text, **ctx)})
+        self._dm({"id": user_id}, {"text": render(text, **ctx)})

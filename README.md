@@ -337,6 +337,7 @@ Open `https://YOUR-DOMAIN/admin` and sign in with your admin password. The dashb
 - 📈 flows started per day for the last 14 days, and your most used flows
 - 👥 every connected Instagram account: username and ID, status, token expiry and last refresh, and whether it uses its own rules or `rules.yaml`
 - per account: **⏸ Pause / ▶ Resume** and **🔑** to refresh its token now
+- 📉 **stats per account** for the last 30 days: matches (flows started by a comment or DM keyword), DMs sent, button clicks and emails collected, with all-time totals and a daily chart. Pick the account in the list (or click its name) and the metric above the chart. Activity recorded before per-account stats existed counts for the `.env` account
 - buttons to download the email list as CSV, send a test alert and connect another Instagram account
 
 The status of an account is one of:
@@ -378,6 +379,7 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 | `GET /admin/activity?token=ADMIN_TOKEN&days=14` | Events per day and the most started flows |
 | `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
 | `GET /admin/accounts?token=ADMIN_TOKEN` | Connected Instagram accounts with status (`health`) and token health |
+| `GET /admin/accounts/<id>/stats?days=30&token=ADMIN_TOKEN` | Matches, DMs, clicks and emails of one account per UTC day (`days` 1–90), plus totals |
 | `POST /admin/accounts/<id>/pause?token=ADMIN_TOKEN` | Pauses an account (its events are ignored); `/resume` turns it back on |
 | `GET /admin/token?token=ADMIN_TOKEN&account=ID` | Token expiry, last refresh and last error (`account` optional, default: the `.env` account) |
 | `POST /admin/token/refresh?token=ADMIN_TOKEN&account=ID` | Refreshes a token now |
@@ -397,7 +399,7 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 ```
 app/
   main.py        web server: webhook + admin endpoints
-  admin.html     admin dashboard (stats, connected accounts, pause/resume, CSV export)
+  admin.html     admin dashboard (stats, per-account charts, accounts, pause/resume, CSV export)
   auth.py        admin login: password hash, session cookie, login rate limit
   bot.py         flow engine (comments, buttons, follow gate, email)
   rules.py       rules loader + validation: rules.yaml (hot reload) and rules per account
@@ -422,6 +424,7 @@ tests/
 
 - [x] Web dashboard to see stats, connected accounts and export emails
 - [x] Pause and resume accounts from the dashboard
+- [x] Stats per account with a 30-day chart
 - [ ] Edit rules from the dashboard
 - [x] Multiple Instagram accounts
 - [ ] Send waitlist emails to a newsletter tool (Mailchimp, Brevo, etc.)

@@ -371,6 +371,15 @@ def _set_active(account_id: str, active: bool) -> dict:
     return _account_info(account_id, db.get_account(account_id))
 
 
+@app.get("/admin/accounts/{account_id}/stats", dependencies=[ADMIN])
+def account_stats(account_id: str, days: int = Query(30, ge=1, le=90)):
+    """Matches, DMs, button clicks and emails of one account, per day (for the chart).
+    The .env account also counts what was stored before stats were kept per account."""
+    acc = _rules_account(account_id)
+    data = db.account_stats(acc, days, include_unassigned=acc == tokens.account_id)
+    return {"account": acc, "range_days": days, **data}
+
+
 @app.post("/admin/accounts/{account_id}/pause", dependencies=[ADMIN])
 def account_pause(account_id: str):
     """Stop answering comments/DMs and refreshing the token of one account."""

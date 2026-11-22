@@ -75,7 +75,7 @@ class AccountRouter:
                 api = InstagramAPI(self.s, self.client, token_provider=tm.current,
                                    account_id=ig_id)
                 bot = self._bots[account_id] = Bot(api, self.rules.for_account(account_id), self.db,
-                                                   own_id=ig_id)
+                                                   own_id=ig_id, account_id=account_id)
             return bot
 
     # --- routing ---------------------------------------------------------

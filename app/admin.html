@@ -47,6 +47,16 @@
   .acts { white-space:nowrap; text-align:right; } .acts button { padding:5px 10px; }
   .scroll { overflow-x:auto; }
   #accounts td { vertical-align:middle; }
+  #accounts a.pick { color:inherit; text-decoration:none; cursor:pointer; }
+  #accounts tr.sel td { background:rgba(255,61,127,.06); }
+  select { background:var(--panel); color:var(--text); border:1px solid var(--line);
+           border-radius:8px; padding:7px 10px; font:inherit; font-size:13px; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; }
+  .tabs button.on { background:var(--accent); border-color:var(--accent); }
+  .bar-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .bar-head .sp { flex:1; }
+  .kpi .s { color:var(--muted); font-size:12px; margin-top:2px; }
+  #accChart { gap:3px; } #accChart .d { font-size:10px; }
 </style>
 </head>
 <body>
@@ -68,6 +78,18 @@
   <div class="card scroll">
     <table id="accounts"><tr><td class="muted">Loading…</td></tr></table>
     <div id="accMsg" class="muted" style="margin-top:8px"></div>
+  </div>
+
+  <h2>Stats per account · last 30 days</h2>
+  <div class="card">
+    <div class="bar-head">
+      <select id="statsAccount" aria-label="Account"></select>
+      <span class="sp"></span>
+      <div class="tabs" id="metricTabs"></div>
+    </div>
+    <div class="grid" id="accKpis"></div>
+    <div class="chart" id="accChart" style="margin-top:14px"></div>
+    <div class="muted" id="accChartLabel" style="margin-top:8px"></div>
   </div>
 
   <h2>Top flows</h2>
@@ -144,8 +166,8 @@ function renderAccounts(d) {
       ? (a.active ? `<button data-act="pause" data-id="${esc(a.account_id)}">⏸ Pause</button>`
                   : `<button data-act="resume" data-id="${esc(a.account_id)}" class="primary">▶ Resume</button>`)
       : "";
-    return `<tr>
-      <td><b>${name}</b>${a.is_default ? '<span class="tag">.env</span>' : ""}
+    return `<tr data-id="${esc(a.account_id)}">
+      <td><a class="pick" data-pick="${esc(a.account_id)}" title="Show stats"><b>${name}</b></a>${a.is_default ? '<span class="tag">.env</span>' : ""}
         <div class="muted">ID ${esc(a.account_id)}${a.connected_at ? " · since " + esc(fmtDate(a.connected_at)) : ""}</div></td>
       <td><span class="dot" style="background:${HEALTH_COLOR[a.health] || "var(--muted)"}"></span>${esc(a.health_label)}${err}</td>
       <td>${token}</td>
@@ -177,12 +199,71 @@ async function accountAction(btn) {
     }, $("accMsg"));
 }
 
-async function loadAccounts() { renderAccounts(await api("/admin/accounts")); }
+// --- Stats per account -------------------------------------------------------
+const METRICS = [["matches", "Matches", "Flows started by a comment or DM keyword"],
+                 ["dms", "DMs sent", "Messages the bot sent"],
+                 ["clicks", "Button clicks", "Buttons tapped in DMs"],
+                 ["emails", "Emails", "Email addresses collected"]];
+let statsAccount = null, metric = "matches", accStats = null;
+
+function accountName(a) { return a.username ? "@" + a.username : a.account_id; }
+
+function renderStatsPicker(accounts) {
+  if (!accounts.some(a => a.account_id === statsAccount)) statsAccount = accounts[0]?.account_id ?? null;
+  $("statsAccount").innerHTML = accounts.map(a =>
+    `<option value="${esc(a.account_id)}" ${a.account_id === statsAccount ? "selected" : ""}>${esc(accountName(a))}</option>`
+  ).join("") || `<option value="">No account</option>`;
+  document.querySelectorAll("#accounts tr[data-id]").forEach(tr =>
+    tr.classList.toggle("sel", tr.dataset.id === statsAccount));
+}
+
+function renderAccStats() {
+  $("metricTabs").innerHTML = METRICS.map(([k, l]) =>
+    `<button data-metric="${k}" class="${k === metric ? "on" : ""}">${l}</button>`).join("");
+  if (!accStats) {
+    $("accKpis").innerHTML = ""; $("accChart").innerHTML = "";
+    $("accChartLabel").textContent = statsAccount ? "Loading…" : "No account connected yet.";
+    return;
+  }
+  $("accKpis").innerHTML = METRICS.map(([k, l]) =>
+    `<div class="card kpi"><div class="l">${l}</div><div class="v">${(accStats.last_days[k] || 0).toLocaleString()}</div>
+       <div class="s">${(accStats.totals[k] || 0).toLocaleString()} all time</div></div>`).join("");
+  const vals = accStats.days.map(d => d[metric] || 0);
+  const max = Math.max(1, ...vals);
+  $("accChart").innerHTML = accStats.days.map((d, i) =>
+    `<div class="col" title="${esc(d.date)}: ${vals[i]}">
+       <div class="b" style="height:${(vals[i] / max) * 100}%"></div>
+       <div class="d">${i % 5 === 4 || i === vals.length - 1 ? esc(d.date.slice(8)) + "." + esc(d.date.slice(5, 7)) : "&nbsp;"}</div></div>`).join("");
+  const m = METRICS.find(x => x[0] === metric);
+  $("accChartLabel").textContent = `${m[2]} per day (UTC) · ${vals.reduce((a, b) => a + b, 0).toLocaleString()} in 30 days`;
+}
+
+async function loadAccStats() {
+  if (!statsAccount) { accStats = null; renderAccStats(); return; }
+  const id = statsAccount;
+  const d = await api(`/admin/accounts/${encodeURIComponent(id)}/stats?days=30`);
+  if (id === statsAccount) { accStats = d; renderAccStats(); }
+}
+
+function selectAccount(id) {
+  if (id === statsAccount) return;
+  statsAccount = id; accStats = null;
+  document.querySelectorAll("#accounts tr[data-id]").forEach(tr => tr.classList.toggle("sel", tr.dataset.id === id));
+  $("statsAccount").value = id;
+  renderAccStats();
+  loadAccStats().catch(e => { $("accChartLabel").textContent = "⚠ " + e.message; });
+}
+
+async function loadAccounts() {
+  const d = await api("/admin/accounts");
+  renderAccounts(d); renderStatsPicker(d.accounts);
+}
 
 async function load() {
   try {
     const [s, a, acc] = await Promise.all([api("/admin/stats"), api("/admin/activity"), api("/admin/accounts")]);
-    renderStats(s); renderActivity(a); renderAccounts(acc);
+    renderStats(s); renderActivity(a); renderAccounts(acc); renderStatsPicker(acc.accounts);
+    await loadAccStats();
     $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) {
     if (e.message !== "unauthorized") $("updated").textContent = "⚠ " + e.message;
@@ -204,7 +285,14 @@ $("csv").onclick = async () => {
   const a = Object.assign(document.createElement("a"), { href: url, download: "emails.csv" });
   a.click(); URL.revokeObjectURL(url);
 };
+$("statsAccount").onchange = (e) => selectAccount(e.target.value);
+$("metricTabs").onclick = (e) => {
+  const b = e.target.closest("button[data-metric]");
+  if (b) { metric = b.dataset.metric; renderAccStats(); }
+};
 $("accounts").onclick = (e) => {
+  const pick = e.target.closest("[data-pick]");
+  if (pick) { selectAccount(pick.dataset.pick); $("statsAccount").scrollIntoView({ behavior: "smooth", block: "center" }); return; }
   const btn = e.target.closest("button[data-act]");
   if (btn && !btn.disabled) accountAction(btn);
 };
@@ -219,6 +307,7 @@ $("connect").onclick = (e) => action(e.target, async () => {
   return "Opening Instagram…";
 });
 
+renderAccStats();
 load();
 setInterval(() => { if (!document.hidden) load(); }, 60000);
 </script>

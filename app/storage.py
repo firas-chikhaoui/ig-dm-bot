@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 """
 
+# Event kinds shown in the per-account stats -> metric name.
+STAT_KINDS = {"flow_started": "matches", "dm_sent": "dms", "button": "clicks",
+              "email_collected": "emails"}
+
 # Tables holding data about a person, keyed by their Instagram user id.
 USER_TABLES = ("triggers", "user_state", "emails", "follow_checks", "events")
 
@@ -96,7 +100,18 @@ class Storage:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns that older databases don't have yet."""
+        for table in ("events", "emails"):
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if "account_id" not in cols:
+                # NULL = stored before stats were kept per account (the .env account)
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN account_id TEXT")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS events_account_time "
+                           "ON events(account_id, created_at)")
 
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -163,13 +178,14 @@ class Storage:
 
     # --- emails ----------------------------------------------------------
     def save_email(self, user_id: str, username: str | None, email: str, list_name: str,
-                   flow: str | None) -> None:
+                   flow: str | None, account_id: str | None = None) -> None:
         self._exec(
-            """INSERT INTO emails(user_id, username, email, list, flow, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO emails(user_id, username, email, list, flow, created_at, account_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, list) DO UPDATE SET email = excluded.email,
-                 created_at = excluded.created_at""",
-            (user_id, username, email, list_name, flow, time.time()),
+                 created_at = excluded.created_at,
+                 account_id = COALESCE(excluded.account_id, emails.account_id)""",
+            (user_id, username, email, list_name, flow, time.time(), account_id),
         )
 
     def list_emails(self, list_name: str | None = None) -> list[sqlite3.Row]:
@@ -295,10 +311,12 @@ class Storage:
             return row
 
     # --- stats -----------------------------------------------------------
-    def log_event(self, user_id: str | None, kind: str, detail: str = "") -> None:
+    def log_event(self, user_id: str | None, kind: str, detail: str = "",
+                  account_id: str | None = None, at: float | None = None) -> None:
         self._exec(
-            "INSERT INTO events(user_id, kind, detail, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, kind, detail, time.time()),
+            "INSERT INTO events(user_id, kind, detail, created_at, account_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, kind, detail, time.time() if at is None else at, account_id),
         )
 
     def stats(self) -> dict[str, int]:
@@ -331,3 +349,40 @@ class Storage:
             "SELECT detail AS flow, COUNT(*) AS n FROM events WHERE kind = 'flow_started' "
             "GROUP BY detail ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
         return [{"flow": r["flow"], "started": r["n"]} for r in rows]
+
+    def account_stats(self, account_id: str, days: int = 30, include_unassigned: bool = False,
+                      now: float | None = None) -> dict:
+        """Matches, DMs, button clicks and emails of one account: totals (all time and for
+        the last `days` UTC days) and one row per day, oldest first (missing days = 0).
+
+        include_unassigned also counts rows stored before stats were kept per account
+        (account_id NULL); pass it for the .env account, which handled all of them."""
+        days = max(1, min(int(days), 90))
+        now = time.time() if now is None else now
+        today = int(now // 86400)
+        first = today - days + 1
+        where = "(account_id = ? OR account_id IS NULL)" if include_unassigned else \
+            "account_id = ?"
+        kinds = tuple(STAT_KINDS)
+        marks = ",".join("?" * len(kinds))
+        totals = {m: 0 for m in STAT_KINDS.values()}
+        window = dict(totals)
+        for r in self._exec(
+                f"SELECT kind, COUNT(*) AS n, SUM(created_at >= ?) AS recent FROM events "
+                f"WHERE {where} AND kind IN ({marks}) GROUP BY kind",
+                (first * 86400, account_id, *kinds)).fetchall():
+            totals[STAT_KINDS[r["kind"]]] = r["n"]
+            window[STAT_KINDS[r["kind"]]] = r["recent"] or 0
+        # emails: the stored addresses (one per person and list), not the events
+        totals["emails"] = self._exec(f"SELECT COUNT(*) FROM emails WHERE {where}",
+                                      (account_id,)).fetchone()[0]
+        by_day = {d: {m: 0 for m in STAT_KINDS.values()} for d in range(first, today + 1)}
+        for r in self._exec(
+                f"SELECT CAST(created_at / 86400 AS INTEGER) AS day, kind, COUNT(*) AS n "
+                f"FROM events WHERE {where} AND kind IN ({marks}) AND created_at >= ? "
+                f"GROUP BY day, kind", (account_id, *kinds, first * 86400)).fetchall():
+            if r["day"] in by_day:
+                by_day[r["day"]][STAT_KINDS[r["kind"]]] = r["n"]
+        return {"totals": totals, "last_days": window, "days": [
+            {"date": time.strftime("%Y-%m-%d", time.gmtime(d * 86400)), **c}
+            for d, c in by_day.items()]}
