@@ -154,6 +154,8 @@ Set `DRY_RUN=true` in `.env`, start the bot, then open **http://localhost:8000/p
 
 Comment on the fake reel on the left; the DMs appear on the right like on a phone. You can tap the buttons, type your email, and use the toggle to pretend the follower does or doesn't follow you. Nothing is sent to Instagram. (The page is disabled when `DRY_RUN=false`.)
 
+By default the playground runs the rules of the `.env` account. `/playground?account=1784xxxx` runs the saved rules of another account, and **🧪 Test in playground** in the dashboard's rules editor opens it with the rules you are editing, before you save them.
+
 ### Test without Instagram from the command line
 
 Set `DRY_RUN=true` in `.env`, start the bot, and in a second terminal:
@@ -304,7 +306,7 @@ python scripts/accounts.py rules-import 1784xxxx shop.yaml      # validate + sto
 python scripts/accounts.py rules-reset 1784xxxx                 # delete stored rules, use rules.yaml again
 ```
 
-The same works over HTTP (see [Admin endpoints](#admin-endpoints)), e.g. `curl -X PUT --data-binary @shop.yaml "https://YOUR-DOMAIN/admin/rules?token=ADMIN_TOKEN&account=1784xxxx"`. Removing an account also removes its rules. The playground runs the rules of the `.env` account.
+The same works over HTTP (see [Admin endpoints](#admin-endpoints)), e.g. `curl -X PUT --data-binary @shop.yaml "https://YOUR-DOMAIN/admin/rules?token=ADMIN_TOKEN&account=1784xxxx"`. Removing an account also removes its rules. The easiest way is the [rules editor](#dashboard) in the dashboard.
 
 **Routing.** All accounts share one webhook URL. Every webhook `entry` carries the id of the Instagram account it is about, and the bot hands it to that account, which replies with its own token. Events for a paused account are ignored. If the bot serves only one account, events with an unknown id still go to it (it logs the id once, so you can put it into `IG_USER_ID`); with several accounts, events for unknown ids are ignored with a warning. To test routing locally: `python scripts/simulate.py comment "guide" --account 1784xxxx`.
 
@@ -338,6 +340,7 @@ Open `https://YOUR-DOMAIN/admin` and sign in with your admin password. The dashb
 - 👥 every connected Instagram account: username and ID, status, token expiry and last refresh, and whether it uses its own rules or `rules.yaml`
 - per account: **⏸ Pause / ▶ Resume** and **🔑** to refresh its token now
 - 📉 **stats per account** for the last 30 days: matches (flows started by a comment or DM keyword), DMs sent, button clicks and emails collected, with all-time totals and a daily chart. Pick the account in the list (or click its name) and the metric above the chart. Activity recorded before per-account stats existed counts for the `.env` account
+- ✏️ a **rules editor**: pick an account and edit its rules as YAML right in the browser. The rules are checked as you type, with the same validation the bot uses (YAML errors show the line and column), and **💾 Save** (or Ctrl/Cmd+S) is only possible when they are valid. Saved rules are live immediately, no restart. An account that still uses `rules.yaml` gets its own copy when you save; **Use rules.yaml** deletes its own rules again. **🧪 Test in playground** opens the playground with your unsaved rules (needs `DRY_RUN=true`; the draft stays in your browser and nothing is sent to Instagram)
 - buttons to download the email list as CSV, send a test alert and connect another Instagram account
 
 The status of an account is one of:
@@ -387,6 +390,7 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 | `PUT /admin/rules?token=ADMIN_TOKEN&account=ID` | Validates the YAML body and stores it as the account's rules (`400` with the error if invalid) |
 | `POST /admin/rules/validate?token=ADMIN_TOKEN` | Checks a YAML body without saving it |
 | `DELETE /admin/rules?token=ADMIN_TOKEN&account=ID` | Deletes the stored rules; the account uses `rules.yaml` again |
+| `GET /playground/info?account=ID`, `POST /playground/event` | Dry-run playground; the event body may carry `account` and `rules` (unsaved YAML) to test them |
 | `GET /admin/connect?token=ADMIN_TOKEN` | Redirects to Instagram's login to connect an account (`POST` returns the URL as JSON) |
 | `GET /connect/callback` | Where Instagram sends the browser back after the login (add it as OAuth redirect URI) |
 | `POST /admin/alerts/test?token=ADMIN_TOKEN` | Sends a test message to your Telegram alert chat |
@@ -425,7 +429,7 @@ tests/
 - [x] Web dashboard to see stats, connected accounts and export emails
 - [x] Pause and resume accounts from the dashboard
 - [x] Stats per account with a 30-day chart
-- [ ] Edit rules from the dashboard
+- [x] Edit rules from the dashboard
 - [x] Multiple Instagram accounts
 - [ ] Send waitlist emails to a newsletter tool (Mailchimp, Brevo, etc.)
 

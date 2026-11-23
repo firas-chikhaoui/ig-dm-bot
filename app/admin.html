@@ -57,6 +57,16 @@
   .bar-head .sp { flex:1; }
   .kpi .s { color:var(--muted); font-size:12px; margin-top:2px; }
   #accChart { gap:3px; } #accChart .d { font-size:10px; }
+  .editor { width:100%; min-height:420px; resize:vertical; background:#0f0f14; color:var(--text);
+            border:1px solid var(--line); border-radius:10px; padding:12px 14px; tab-size:2;
+            font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:pre;
+            overflow:auto; }
+  .editor:focus { outline:none; border-color:#3a3a46; }
+  .editor.bad { border-color:var(--bad); }
+  .check { margin-top:10px; font-size:13px; padding:9px 12px; border-radius:8px; background:#0f0f14;
+           border:1px solid var(--line); white-space:pre-wrap; word-break:break-word; }
+  .check.ok { border-color:rgba(46,204,113,.45); } .check.bad { border-color:rgba(255,77,79,.55); color:#ffb3b4; }
+  .ed-acts { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center; }
 </style>
 </head>
 <body>
@@ -90,6 +100,26 @@
     <div class="grid" id="accKpis"></div>
     <div class="chart" id="accChart" style="margin-top:14px"></div>
     <div class="muted" id="accChartLabel" style="margin-top:8px"></div>
+  </div>
+
+  <h2>Rules editor <span id="rulesState" style="text-transform:none;letter-spacing:0"></span></h2>
+  <div class="card">
+    <div class="bar-head">
+      <select id="rulesAccount" aria-label="Account for the rules"></select>
+      <span id="rulesSource" class="muted"></span>
+      <span class="sp"></span>
+      <a class="btn" href="https://github.com/firas-chikhaoui/ig-dm-bot#the-rules-file" target="_blank" rel="noopener">Rules format ↗</a>
+    </div>
+    <textarea id="rulesText" class="editor" spellcheck="false" autocomplete="off" autocapitalize="off"
+      aria-label="Rules (YAML)" placeholder="Loading…"></textarea>
+    <div id="rulesCheck" class="check muted">Checked as you type. Nothing is saved until you click Save.</div>
+    <div class="ed-acts">
+      <button id="rulesSave" class="primary">💾 Save</button>
+      <button id="rulesTest">🧪 Test in playground</button>
+      <button id="rulesRevert">↺ Discard changes</button>
+      <button id="rulesReset">Use rules.yaml</button>
+      <span id="rulesMsg" class="muted"></span>
+    </div>
   </div>
 
   <h2>Top flows</h2>
@@ -256,13 +286,15 @@ function selectAccount(id) {
 
 async function loadAccounts() {
   const d = await api("/admin/accounts");
-  renderAccounts(d); renderStatsPicker(d.accounts);
+  renderAccounts(d); renderStatsPicker(d.accounts); renderRulesPicker(d.accounts, d.default);
 }
 
 async function load() {
   try {
     const [s, a, acc] = await Promise.all([api("/admin/stats"), api("/admin/activity"), api("/admin/accounts")]);
+    dryRun = !!s.dry_run;
     renderStats(s); renderActivity(a); renderAccounts(acc); renderStatsPicker(acc.accounts);
+    renderRulesPicker(acc.accounts, acc.default); renderRulesState();
     await loadAccStats();
     $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) {
@@ -306,6 +338,134 @@ $("connect").onclick = (e) => action(e.target, async () => {
   window.location.href = r.url;  // Instagram login, then back to /connect/callback
   return "Opening Instagram…";
 });
+
+// --- Rules editor ------------------------------------------------------------
+// Edits the YAML rules of one account. Every change is validated on the server
+// (same checks as the bot) before it can be saved; "Test in playground" runs the
+// unsaved text in the dry-run playground.
+const DRAFT_KEY = "igdm.rulesDraft";
+let rulesAccount = null, rulesSaved = "", rulesSource = "file", rulesValid = false,
+    checkTimer = null, checkSeq = 0, dryRun = false;
+
+function rulesDirty() { return $("rulesText").value !== rulesSaved; }
+
+function renderRulesState() {
+  const dirty = rulesDirty();
+  $("rulesState").textContent = dirty ? "· unsaved changes" : "";
+  $("rulesSource").textContent = rulesSource === "database"
+    ? "Own rules, stored in the database" : "Uses rules.yaml (saving gives this account its own copy)";
+  $("rulesSave").disabled = !dirty || !rulesValid;
+  $("rulesRevert").disabled = !dirty;
+  $("rulesReset").disabled = rulesSource !== "database";
+  $("rulesTest").disabled = !rulesValid;
+  $("rulesTest").title = dryRun ? "Open the playground with these rules (nothing is sent)"
+    : "The playground only runs with DRY_RUN=true";
+}
+
+function showCheck(ok, text) {
+  const el = $("rulesCheck");
+  el.className = "check " + (ok === null ? "muted" : ok ? "ok" : "bad");
+  el.textContent = text;
+  $("rulesText").classList.toggle("bad", ok === false);
+}
+
+async function checkRules() {
+  const seq = ++checkSeq;
+  const r = await api("/admin/rules/validate", { method: "POST",
+    headers: { "Content-Type": "text/yaml; charset=utf-8" }, body: $("rulesText").value });
+  if (seq !== checkSeq) return;  // a newer check is running
+  rulesValid = r.valid;
+  if (r.valid) {
+    showCheck(true, `✅ Valid · ${r.reels} reel rule(s) · ${r.flows.length} flow(s)` +
+      (r.flows.length ? ": " + r.flows.join(", ") : ""));
+  } else {
+    showCheck(false, "⚠ " + r.error);
+  }
+  renderRulesState();
+}
+
+function scheduleCheck() {
+  rulesValid = false; renderRulesState();
+  clearTimeout(checkTimer);
+  checkTimer = setTimeout(() => checkRules().catch(e => showCheck(false, "⚠ " + e.message)), 400);
+}
+
+async function loadRules(id) {
+  rulesAccount = id;
+  $("rulesText").value = ""; $("rulesText").placeholder = "Loading…";
+  const r = await fetch(`/admin/rules?account=${encodeURIComponent(id)}`, { credentials: "same-origin" });
+  if (r.status === 401) { toLogin(); return; }
+  if (!r.ok) { showCheck(false, `⚠ Could not load rules (HTTP ${r.status})`); return; }
+  const text = await r.text();
+  if (id !== rulesAccount) return;  // another account was picked meanwhile
+  rulesSaved = text;
+  rulesSource = r.headers.get("X-Rules-Source") || "file";
+  $("rulesText").value = rulesSaved;
+  $("rulesMsg").textContent = "";
+  await checkRules();
+}
+
+function renderRulesPicker(accounts, def) {
+  const list = accounts.length ? accounts : [{ account_id: def, username: "" }];
+  const keep = list.some(a => a.account_id === rulesAccount);
+  $("rulesAccount").innerHTML = list.map(a =>
+    `<option value="${esc(a.account_id)}">${esc(accountName(a))}${a.account_id === def ? " (.env)" : ""}</option>`).join("");
+  if (keep) { $("rulesAccount").value = rulesAccount; return; }
+  $("rulesAccount").value = list[0].account_id;
+  loadRules(list[0].account_id).catch(e => showCheck(false, "⚠ " + e.message));
+}
+
+$("rulesText").addEventListener("input", scheduleCheck);
+$("rulesText").addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();  // YAML needs spaces, never tabs
+    t.setRangeText("  ", t.selectionStart, t.selectionEnd, "end");
+    scheduleCheck();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    e.preventDefault();
+    if (!$("rulesSave").disabled) $("rulesSave").click();
+  }
+});
+$("rulesAccount").onchange = (e) => {
+  if (rulesDirty() && !confirm("Discard your unsaved rule changes?")) {
+    e.target.value = rulesAccount; return;
+  }
+  loadRules(e.target.value).catch(err => showCheck(false, "⚠ " + err.message));
+};
+$("rulesSave").onclick = (e) => action(e.target, async () => {
+  const text = $("rulesText").value;
+  const r = await api(`/admin/rules?account=${encodeURIComponent(rulesAccount)}`, { method: "PUT",
+    headers: { "Content-Type": "text/yaml; charset=utf-8" }, body: text });
+  rulesSaved = text; rulesSource = "database";
+  loadAccounts().catch(() => {});
+  return `✅ Saved · live now for ${r.reels} reel rule(s), ${r.flows.length} flow(s)`;
+}, $("rulesMsg")).then(renderRulesState);
+$("rulesRevert").onclick = () => {
+  $("rulesText").value = rulesSaved; $("rulesMsg").textContent = "";
+  checkRules().catch(e => showCheck(false, "⚠ " + e.message));
+};
+$("rulesReset").onclick = (e) => {
+  if (!confirm("Delete this account's own rules? It will use rules.yaml again.")) return;
+  action(e.target, async () => {
+    await api(`/admin/rules?account=${encodeURIComponent(rulesAccount)}`, { method: "DELETE" });
+    await loadRules(rulesAccount);
+    loadAccounts().catch(() => {});
+    return "Now using rules.yaml";
+  }, $("rulesMsg")).then(renderRulesState);
+};
+$("rulesTest").onclick = () => {
+  if (!dryRun) { $("rulesMsg").textContent = "⚠ The playground only runs with DRY_RUN=true in .env"; return; }
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ account: rulesAccount, yaml: $("rulesText").value }));
+    window.open("/playground?draft=1", "_blank", "noopener");
+  } catch {
+    // no browser storage: test the account's saved rules instead
+    window.open(`/playground?account=${encodeURIComponent(rulesAccount)}`, "_blank", "noopener");
+    $("rulesMsg").textContent = "Browser storage is off: the playground shows the saved rules";
+  }
+};
+window.addEventListener("beforeunload", (e) => { if (rulesDirty()) { e.preventDefault(); e.returnValue = ""; } });
 
 renderAccStats();
 load();

@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 
 from .alerts import setup_alerts
 from .auth import COOKIE_NAME, AdminAuth, login_page, safe_next
+from .bot import Bot
 from .config import settings
 from .oauth import CALLBACK_PATH, InstagramOAuth, OAuthError, result_page
 from .privacy import (DEFAULT_DELETE_KEYWORDS, SignedRequestError, data_deletion_page,
@@ -294,7 +295,8 @@ def logout(request: Request):
 @app.get("/admin/stats", dependencies=[ADMIN])
 def stats():
     r = bot.rules.get()
-    return {"stats": db.stats(), "reels": len(r.reels), "flows": list(r.flows)}
+    return {"stats": db.stats(), "reels": len(r.reels), "flows": list(r.flows),
+            "dry_run": settings.dry_run}
 
 
 @app.get("/admin/activity", dependencies=[ADMIN])
@@ -546,20 +548,72 @@ def playground():
     return HTMLResponse(PLAYGROUND_HTML.read_text(encoding="utf-8"))
 
 
-@app.get("/playground/info")
-def playground_info():
-    _require_dry_run()
-    r = bot.rules.get()
+class _DraftRules:
+    """Rules that are not saved anywhere, with the same `get()` as RulesStore."""
+
+    def __init__(self, rules):
+        self.rules = rules
+
+    def get(self):
+        return self.rules
+
+
+def _playground_bot(ev: dict) -> Bot:
+    """The bot the playground talks to: the .env account by default, another account
+    (`account`), and/or rules that are not saved yet (`rules`, YAML from the editor).
+    Every variant sends through the same dry-run client, so nothing reaches Instagram."""
+    account, draft = ev.get("account"), ev.get("rules")
+    if not account and draft is None:
+        return bot
+    acc = _rules_account(str(account) if account else None)
+    if draft is None:
+        rules = account_rules.for_account(acc)
+    else:
+        if not isinstance(draft, str) or len(draft.encode("utf-8")) > 512 * 1024:
+            raise HTTPException(status_code=400, detail="rules must be YAML text up to 512 KB")
+        try:
+            rules = _DraftRules(parse_rules_yaml(draft))
+        except RulesError as e:
+            raise HTTPException(status_code=400, detail=f"draft rules are invalid: {e}")
+    return Bot(bot.api, rules, db, own_id=bot.own_id, account_id=acc)
+
+
+def _playground_info(ev: dict) -> dict:
+    r = _playground_bot(ev).rules.get()
     return {"reels": [{"id": x.id, "name": x.name or x.flow, "keywords": x.keywords}
                       for x in r.reels],
             "dm_keywords": [k for t in r.dm_triggers for k in t.keywords]}
 
 
+@app.get("/playground/info")
+def playground_info(account: str | None = None):
+    _require_dry_run()
+    return _playground_info({"account": account})
+
+
+@app.post("/playground/info")
+async def playground_info_draft(request: Request):
+    """Like GET /playground/info, for rules sent in the body (the editor's draft)."""
+    _require_dry_run()
+    return _playground_info(await _json_object(request))
+
+
+async def _json_object(request: Request) -> dict:
+    try:
+        ev = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    if not isinstance(ev, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    return ev
+
+
 @app.post("/playground/event")
 async def playground_event(request: Request):
     _require_dry_run()
-    ev = await request.json()
-    api = bot.api
+    ev = await _json_object(request)
+    pbot = _playground_bot(ev)
+    api = pbot.api
     api.fake_follows = bool(ev.get("follows", False))
     uid, username = str(ev.get("user_id", "111")), ev.get("username") or "test_user"
     mid = f"pg-{time.time_ns()}"
@@ -580,7 +634,7 @@ async def playground_event(request: Request):
         raise HTTPException(status_code=400, detail="kind must be comment, click or dm")
 
     start = len(api.outbox)
-    bot.handle_webhook(body)
+    pbot.handle_webhook(body)
     out = []
     for item in api.outbox[start:]:
         b = item["body"]

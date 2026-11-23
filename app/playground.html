@@ -63,6 +63,8 @@
   .bubble, .card, .note, .comment { flex-shrink:0; }
   .note { align-self:center; color:var(--muted); font-size:12px; text-align:center; padding:4px 10px; }
   .empty { margin:auto; color:var(--muted); text-align:center; font-size:13px; padding:20px; }
+  .banner { background:rgba(255,61,127,.1); border-bottom:1px solid rgba(255,61,127,.35); padding:9px 28px;
+            font-size:13px; }
   @keyframes pop { from { transform:scale(.92); opacity:0 } to { transform:none; opacity:1 } }
 </style>
 </head>
@@ -74,6 +76,8 @@
   <label>Follows your account <button class="toggle" id="follows" aria-label="follows"></button></label>
   <button class="ghost" id="reset">↺ New follower</button>
 </header>
+
+<div class="banner" id="banner" hidden></div>
 
 <main>
   <div>
@@ -100,6 +104,26 @@ const $ = id => document.getElementById(id);
 let userId = "u" + Math.floor(Math.random() * 1e9);
 let follows = false, reels = [];
 
+// Which rules to run: the .env account (default), ?account=ID (its saved rules), or
+// ?draft=1 (unsaved rules from the dashboard editor, kept in this browser only).
+const params = new URLSearchParams(location.search);
+const target = {};
+if (params.get("account")) target.account = params.get("account");
+if (params.get("draft") === "1") {
+  try {
+    const d = JSON.parse(localStorage.getItem("igdm.rulesDraft") || "null");
+    if (d && typeof d.yaml === "string") { target.rules = d.yaml; if (d.account) target.account = d.account; }
+  } catch { /* no browser storage: fall back to saved rules */ }
+}
+function showBanner() {
+  const b = $("banner");
+  if (target.rules !== undefined) b.textContent = "🧪 Testing unsaved rules from the dashboard editor" +
+    (target.account ? ` (account ${target.account})` : "") + ". Save them in the dashboard to make them live.";
+  else if (target.account) b.textContent = `Running the saved rules of account ${target.account}.`;
+  else return;
+  b.hidden = false;
+}
+
 $("follows").onclick = () => { follows = !follows; $("follows").classList.toggle("on", follows); };
 $("reset").onclick = () => {
   userId = "u" + Math.floor(Math.random() * 1e9);
@@ -124,7 +148,7 @@ function updateHint() {
 
 async function send(ev) {
   const res = await fetch("/playground/event", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...ev, user_id: userId, username: $("username").value.trim() || "test_user", follows }) });
+    body: JSON.stringify({ ...target, ...ev, user_id: userId, username: $("username").value.trim() || "test_user", follows }) });
   if (!res.ok) { alert("Error: " + await res.text()); return []; }
   return (await res.json()).messages;
 }
@@ -178,11 +202,19 @@ $("dform").onsubmit = async e => {
   render(await send({ kind: "dm", text }));
 };
 
-fetch("/playground/info").then(r => r.json()).then(info => {
+showBanner();
+const infoReq = target.rules !== undefined
+  ? fetch("/playground/info", { method: "POST", headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(target) })
+  : fetch("/playground/info" + (target.account ? "?account=" + encodeURIComponent(target.account) : ""));
+infoReq.then(async r => {
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "HTTP " + r.status);
+  return r.json();
+}).then(info => {
   reels = info.reels;
   $("reel").innerHTML = reels.map(r => `<option>${esc(r.name)}</option>`).join("");
   updateHint();
-});
+}).catch(e => { const b = $("banner"); b.textContent = "⚠ " + e.message; b.hidden = false; });
 </script>
 </body>
 </html>
