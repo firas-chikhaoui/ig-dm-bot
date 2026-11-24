@@ -513,16 +513,74 @@ def alerts_test():
     return {"sent": True}
 
 
+def _iso(ts: float | None) -> str | None:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
+
+
+def _csv_cell(value) -> str:
+    """Spreadsheet apps run cells starting with = + - @ as formulas; neutralise them."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def _email_scope(account: str | None) -> dict:
+    """Filter arguments for one account's emails; none = every account.
+    The .env account also gets the addresses stored before emails were kept per account."""
+    if not account:
+        return {}
+    acc = _rules_account(account)
+    return {"account_id": acc, "include_unassigned": acc == tokens.account_id}
+
+
 @app.get("/admin/emails.csv", dependencies=[ADMIN])
-def emails_csv(list: str | None = None):  # noqa: A002
+def emails_csv(list: str | None = None, account: str | None = None,  # noqa: A002
+               q: str | None = None):
+    """Download collected emails as CSV: all, or of one `account` and/or `list`."""
+    scope = _email_scope(account)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["email", "username", "user_id", "list", "flow", "created_at"])
-    for row in db.list_emails(list):
-        w.writerow([row["email"], row["username"], row["user_id"], row["list"], row["flow"],
-                    datetime.fromtimestamp(row["created_at"], timezone.utc).isoformat()])
+    w.writerow(["email", "username", "user_id", "list", "flow", "created_at", "account_id"])
+    for row in db.list_emails(list, search=q, **scope):
+        w.writerow([_csv_cell(v) for v in (
+            row["email"], row["username"], row["user_id"], row["list"], row["flow"],
+            _iso(row["created_at"]), row["account_id"] or scope.get("account_id", ""))])
+    parts = ["emails", scope.get("account_id"), list]
+    name = "-".join(p for p in parts if p)
+    name = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name) + ".csv"
     return Response(buf.getvalue(), media_type="text/csv",
-                    headers={"Content-Disposition": "attachment; filename=emails.csv"})
+                    headers={"Content-Disposition": f'attachment; filename="{name}"',
+                             "Cache-Control": "no-store"})
+
+
+@app.get("/admin/accounts/{account_id}/emails", dependencies=[ADMIN])
+def account_emails(account_id: str, list: str | None = None,  # noqa: A002
+                   q: str | None = Query(None, max_length=200),
+                   limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
+    """Emails collected by one account, newest first, with its lists and their sizes."""
+    scope = _email_scope(account_id)
+    rows = db.list_emails(list, search=q, limit=limit, offset=offset, newest_first=True,
+                          **scope)
+    return {
+        "account": scope["account_id"],
+        "lists": [{**x, "last_at": _iso(x["last_at"])} for x in db.email_lists(**scope)],
+        "total": db.count_emails(list, search=q, **scope),
+        "limit": limit, "offset": offset,
+        "emails": [{"email": r["email"], "username": r["username"], "user_id": r["user_id"],
+                    "list": r["list"], "flow": r["flow"], "created_at": _iso(r["created_at"])}
+                   for r in rows],
+    }
+
+
+@app.delete("/admin/accounts/{account_id}/emails", dependencies=[ADMIN])
+def account_email_delete(account_id: str, user_id: str = Query(..., min_length=1),
+                         list: str = Query(..., min_length=1)):  # noqa: A002
+    """Remove one person's address from one list of an account (e.g. an unsubscribe).
+    Their other data stays; DELETE /admin/users/<id> removes everything."""
+    n = db.delete_email(user_id, list, **_email_scope(account_id))
+    if not n:
+        raise HTTPException(status_code=404, detail="email not found")
+    log.info("admin removed the %s address of user %s (account %s)", list, user_id, account_id)
+    return {"deleted": n}
 
 
 @app.delete("/admin/users/{user_id}", dependencies=[ADMIN])

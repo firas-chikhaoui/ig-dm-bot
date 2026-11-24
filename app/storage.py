@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS user_state (
     waiting_step TEXT,             -- step waiting for free text (ask_email)
     updated_at REAL NOT NULL
 );
+-- One address per person, list and account (unique index emails_owner, see _migrate).
 CREATE TABLE IF NOT EXISTS emails (
     user_id TEXT NOT NULL,
     username TEXT,
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS emails (
     list TEXT NOT NULL,
     flow TEXT,
     created_at REAL NOT NULL,
-    PRIMARY KEY (user_id, list)
+    account_id TEXT                -- NULL = stored before emails were kept per account
 );
 CREATE TABLE IF NOT EXISTS follow_checks (
     user_id TEXT NOT NULL,
@@ -112,6 +113,23 @@ class Storage:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN account_id TEXT")
         self._conn.execute("CREATE INDEX IF NOT EXISTS events_account_time "
                            "ON events(account_id, created_at)")
+        # Older versions kept one address per person and list (PRIMARY KEY (user_id, list)),
+        # so a person on the "waitlist" of two accounts overwrote the first one. Rebuild
+        # the table without that key; uniqueness now includes the account.
+        if any(r[5] for r in self._conn.execute("PRAGMA table_info(emails)")):
+            self._conn.executescript("""
+                ALTER TABLE emails RENAME TO emails_old;
+                CREATE TABLE emails (user_id TEXT NOT NULL, username TEXT, email TEXT NOT NULL,
+                    list TEXT NOT NULL, flow TEXT, created_at REAL NOT NULL, account_id TEXT);
+                INSERT INTO emails(user_id, username, email, list, flow, created_at, account_id)
+                    SELECT user_id, username, email, list, flow, created_at, account_id
+                    FROM emails_old;
+                DROP TABLE emails_old;
+            """)
+        self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS emails_owner "
+                           "ON emails(IFNULL(account_id, ''), user_id, list)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS emails_account_time "
+                           "ON emails(account_id, created_at)")
 
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -179,21 +197,81 @@ class Storage:
     # --- emails ----------------------------------------------------------
     def save_email(self, user_id: str, username: str | None, email: str, list_name: str,
                    flow: str | None, account_id: str | None = None) -> None:
-        self._exec(
-            """INSERT INTO emails(user_id, username, email, list, flow, created_at, account_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(user_id, list) DO UPDATE SET email = excluded.email,
-                 created_at = excluded.created_at,
-                 account_id = COALESCE(excluded.account_id, emails.account_id)""",
-            (user_id, username, email, list_name, flow, time.time(), account_id),
-        )
+        """Store (or update) the address of one person on one list of one account.
+        A row stored before emails were kept per account is taken over by the account."""
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE emails SET email = ?, created_at = ?, flow = COALESCE(?, flow), "
+                "username = COALESCE(?, username) "
+                "WHERE IFNULL(account_id, '') = IFNULL(?, '') AND user_id = ? AND list = ?",
+                (email, now, flow, username, account_id, user_id, list_name))
+            if cur.rowcount == 0 and account_id is not None:
+                cur = self._conn.execute(
+                    "UPDATE emails SET email = ?, created_at = ?, flow = COALESCE(?, flow), "
+                    "username = COALESCE(?, username), account_id = ? "
+                    "WHERE account_id IS NULL AND user_id = ? AND list = ?",
+                    (email, now, flow, username, account_id, user_id, list_name))
+            if cur.rowcount == 0:
+                self._conn.execute(
+                    "INSERT INTO emails(user_id, username, email, list, flow, created_at, "
+                    "account_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, username, email, list_name, flow, now, account_id))
+            self._conn.commit()
 
-    def list_emails(self, list_name: str | None = None) -> list[sqlite3.Row]:
+    @staticmethod
+    def _email_filter(list_name: str | None, account_id: str | None,
+                      include_unassigned: bool, search: str | None) -> tuple[str, list]:
+        where, args = [], []
+        if account_id is not None:
+            where.append("(account_id = ? OR account_id IS NULL)" if include_unassigned
+                         else "account_id = ?")
+            args.append(account_id)
         if list_name:
-            return self._exec(
-                "SELECT * FROM emails WHERE list = ? ORDER BY created_at", (list_name,)
-            ).fetchall()
-        return self._exec("SELECT * FROM emails ORDER BY created_at").fetchall()
+            where.append("list = ?")
+            args.append(list_name)
+        if search:
+            like = "%" + search.lower().replace("\\", "\\\\").replace("%", "\\%") \
+                .replace("_", "\\_") + "%"
+            where.append("(LOWER(email) LIKE ? ESCAPE '\\' OR LOWER(IFNULL(username, '')) "
+                         "LIKE ? ESCAPE '\\')")
+            args += [like, like]
+        return (" WHERE " + " AND ".join(where)) if where else "", args
+
+    def list_emails(self, list_name: str | None = None, account_id: str | None = None,
+                    include_unassigned: bool = False, search: str | None = None,
+                    limit: int | None = None, offset: int = 0,
+                    newest_first: bool = False) -> list[sqlite3.Row]:
+        """Collected addresses, optionally of one account and/or list.
+        include_unassigned also returns rows stored before emails were kept per account
+        (pass it for the .env account); search matches email and username."""
+        where, args = self._email_filter(list_name, account_id, include_unassigned, search)
+        sql = f"SELECT * FROM emails{where} ORDER BY created_at" + (" DESC" if newest_first
+                                                                    else "")
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args += [int(limit), int(offset)]
+        return self._exec(sql, tuple(args)).fetchall()
+
+    def count_emails(self, list_name: str | None = None, account_id: str | None = None,
+                     include_unassigned: bool = False, search: str | None = None) -> int:
+        where, args = self._email_filter(list_name, account_id, include_unassigned, search)
+        return self._exec(f"SELECT COUNT(*) FROM emails{where}", tuple(args)).fetchone()[0]
+
+    def email_lists(self, account_id: str | None = None,
+                    include_unassigned: bool = False) -> list[dict]:
+        """The lists of one account (or of all) with their number of addresses."""
+        where, args = self._email_filter(None, account_id, include_unassigned, None)
+        rows = self._exec(f"SELECT list, COUNT(*) AS n, MAX(created_at) AS last FROM emails"
+                          f"{where} GROUP BY list ORDER BY list", tuple(args)).fetchall()
+        return [{"list": r["list"], "count": r["n"], "last_at": r["last"]} for r in rows]
+
+    def delete_email(self, user_id: str, list_name: str, account_id: str | None = None,
+                     include_unassigned: bool = False) -> int:
+        """Remove one person's address from one list (e.g. they unsubscribed)."""
+        where, args = self._email_filter(list_name, account_id, include_unassigned, None)
+        return self._exec(f"DELETE FROM emails{where} AND user_id = ?",
+                          (*args, user_id)).rowcount
 
     # --- data deletion ---------------------------------------------------
     def delete_user_data(self, user_id: str) -> int:

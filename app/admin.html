@@ -30,11 +30,11 @@
        text-transform:uppercase; letter-spacing:.06em; }
   .row { display:flex; gap:14px; flex-wrap:wrap; } .row > div { flex:1; min-width:280px; }
   .chart { display:flex; align-items:flex-end; gap:6px; height:160px; padding-top:10px; }
-  .chart .col { flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%;
+  .chart .col { flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%;
                 justify-content:flex-end; }
   .chart .b { width:100%; max-width:34px; background:var(--bar); border-radius:5px 5px 2px 2px;
               min-height:2px; }
-  .chart .d { color:var(--muted); font-size:11px; }
+  .chart .d { color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; max-width:100%; }
   table { width:100%; border-collapse:collapse; font-size:14px; }
   td, th { text-align:left; padding:7px 4px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:500; }
@@ -66,6 +66,10 @@
   .check { margin-top:10px; font-size:13px; padding:9px 12px; border-radius:8px; background:#0f0f14;
            border:1px solid var(--line); white-space:pre-wrap; word-break:break-word; }
   .check.ok { border-color:rgba(46,204,113,.45); } .check.bad { border-color:rgba(255,77,79,.55); color:#ffb3b4; }
+  #emailsTable td.e { word-break:break-all; }
+  #emailsTable .acts button { padding:3px 8px; font-size:12px; }
+  .pager { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  #emailSearch { width:auto; min-width:200px; flex:0 1 260px; padding:7px 10px; font-size:13px; }
   .ed-acts { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center; }
 </style>
 </head>
@@ -122,12 +126,29 @@
     </div>
   </div>
 
+  <h2 id="emails">Emails <span id="emailsSummary" style="text-transform:none;letter-spacing:0"></span></h2>
+  <div class="card">
+    <div class="bar-head">
+      <select id="emailsAccount" aria-label="Account for the emails"></select>
+      <select id="emailsList" aria-label="List"></select>
+      <input id="emailSearch" type="search" placeholder="Search email or username" aria-label="Search">
+      <span class="sp"></span>
+      <button id="emailsCsv">⬇ Download CSV</button>
+    </div>
+    <div class="scroll"><table id="emailsTable"><tr><td class="muted">Loading…</td></tr></table></div>
+    <div class="pager">
+      <button id="emailsPrev">← Newer</button>
+      <button id="emailsNext">Older →</button>
+      <span id="emailsMsg" class="muted"></span>
+    </div>
+  </div>
+
   <h2>Top flows</h2>
   <div class="card"><table id="flows"><tr><th>Flow</th><th>Started</th></tr></table></div>
 
   <h2>Actions</h2>
   <div class="card">
-    <button id="csv">⬇ Download emails (CSV)</button>
+    <button id="csv">⬇ Download all emails (CSV)</button>
     <button id="testAlert">🚨 Send test alert</button>
     <button id="connect">➕ Connect Instagram account</button>
     <span id="msg"></span>
@@ -287,6 +308,7 @@ function selectAccount(id) {
 async function loadAccounts() {
   const d = await api("/admin/accounts");
   renderAccounts(d); renderStatsPicker(d.accounts); renderRulesPicker(d.accounts, d.default);
+  renderEmailsPicker(d.accounts, d.default);
 }
 
 async function load() {
@@ -295,7 +317,8 @@ async function load() {
     dryRun = !!s.dry_run;
     renderStats(s); renderActivity(a); renderAccounts(acc); renderStatsPicker(acc.accounts);
     renderRulesPicker(acc.accounts, acc.default); renderRulesState();
-    await loadAccStats();
+    renderEmailsPicker(acc.accounts, acc.default, false);
+    await Promise.all([loadAccStats(), loadEmails()]);
     $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) {
     if (e.message !== "unauthorized") $("updated").textContent = "⚠ " + e.message;
@@ -309,14 +332,17 @@ async function action(btn, fn, out = $("msg")) {
 }
 
 $("reload").onclick = load;
-$("csv").onclick = async () => {
-  const r = await fetch("/admin/emails.csv", { credentials: "same-origin" });
+async function download(path, fallbackName, out) {
+  const r = await fetch(path, { credentials: "same-origin" });
   if (r.status === 401) { toLogin(); return; }
-  if (!r.ok) { $("msg").textContent = "⚠ download failed"; return; }
+  if (!r.ok) { out.textContent = "⚠ download failed"; return; }
+  const m = /filename="?([^";]+)"?/.exec(r.headers.get("Content-Disposition") || "");
   const url = URL.createObjectURL(await r.blob());
-  const a = Object.assign(document.createElement("a"), { href: url, download: "emails.csv" });
-  a.click(); URL.revokeObjectURL(url);
-};
+  const a = Object.assign(document.createElement("a"), { href: url, download: m ? m[1] : fallbackName });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+$("csv").onclick = () => download("/admin/emails.csv", "emails.csv", $("msg"));
 $("statsAccount").onchange = (e) => selectAccount(e.target.value);
 $("metricTabs").onclick = (e) => {
   const b = e.target.closest("button[data-metric]");
@@ -466,6 +492,96 @@ $("rulesTest").onclick = () => {
   }
 };
 window.addEventListener("beforeunload", (e) => { if (rulesDirty()) { e.preventDefault(); e.returnValue = ""; } });
+
+// --- Emails per account -------------------------------------------------------
+const EMAILS_PAGE = 50;
+let emailsAccount = null, emailsAccounts = [], emailsList = "", emailsQuery = "", emailsOffset = 0, emailsTimer = null,
+    emailsSeq = 0;
+
+function emailsQueryString(extra = {}) {
+  const p = new URLSearchParams();
+  if (emailsList) p.set("list", emailsList);
+  if (emailsQuery) p.set("q", emailsQuery);
+  for (const [k, v] of Object.entries(extra)) p.set(k, v);
+  return p.toString();
+}
+
+function renderEmailsPicker(accounts, def, reload = true) {
+  const list = accounts.length ? accounts : [{ account_id: def, username: "" }];
+  emailsAccounts = list;
+  const keep = list.some(a => a.account_id === emailsAccount);
+  $("emailsAccount").innerHTML = list.map(a =>
+    `<option value="${esc(a.account_id)}">${esc(accountName(a))}${a.account_id === def ? " (.env)" : ""}</option>`).join("");
+  if (!keep) { emailsAccount = list[0].account_id; emailsList = ""; emailsOffset = 0; }
+  $("emailsAccount").value = emailsAccount;
+  if (reload) loadEmails().catch(e => { $("emailsMsg").textContent = "⚠ " + e.message; });
+}
+
+function renderEmails(d) {
+  const lists = d.lists;
+  if (emailsList && !lists.some(l => l.list === emailsList)) emailsList = "";
+  const all = lists.reduce((n, l) => n + l.count, 0);
+  $("emailsList").innerHTML = `<option value="">All lists (${all.toLocaleString()})</option>` +
+    lists.map(l => `<option value="${esc(l.list)}">${esc(l.list)} (${l.count.toLocaleString()})</option>`).join("");
+  $("emailsList").value = emailsList;
+  const acc = emailsAccounts.find(a => a.account_id === d.account) || { account_id: d.account };
+  $("emailsSummary").textContent = all ? `· ${all.toLocaleString()} for ${accountName(acc)}` : "";
+  const head = `<tr><th>Email</th><th>Username</th><th>List</th><th>Flow</th><th>Added</th><th></th></tr>`;
+  const rows = d.emails.map(e => `<tr>
+      <td class="e">${esc(e.email)}</td>
+      <td>${e.username ? "@" + esc(e.username) : `<span class="muted">${esc(e.user_id)}</span>`}</td>
+      <td>${esc(e.list)}</td><td class="muted">${esc(e.flow || "")}</td>
+      <td class="muted" title="${esc(e.created_at)}">${esc(e.created_at ? new Date(e.created_at).toLocaleString() : "")}</td>
+      <td class="acts"><button data-del="${esc(e.user_id)}" data-list="${esc(e.list)}" data-email="${esc(e.email)}" title="Remove from this list">✕</button></td>
+    </tr>`).join("");
+  const empty = emailsQuery ? "No email matches your search."
+    : "No emails collected yet. Add an ask_email step to a flow to build a list.";
+  $("emailsTable").innerHTML = head + (rows || `<tr><td colspan="6" class="muted">${empty}</td></tr>`);
+  const from = d.total ? d.offset + 1 : 0, to = d.offset + d.emails.length;
+  $("emailsMsg").textContent = d.total ? `${from.toLocaleString()}–${to.toLocaleString()} of ${d.total.toLocaleString()}` : "";
+  $("emailsPrev").disabled = d.offset === 0;
+  $("emailsNext").disabled = to >= d.total;
+  $("emailsCsv").disabled = !d.total;
+}
+
+async function loadEmails() {
+  if (!emailsAccount) return;
+  const seq = ++emailsSeq;
+  const d = await api(`/admin/accounts/${encodeURIComponent(emailsAccount)}/emails?` +
+    emailsQueryString({ limit: EMAILS_PAGE, offset: emailsOffset }));
+  if (seq !== emailsSeq) return;  // a newer request is running
+  if (d.offset > 0 && !d.emails.length && d.total) {  // page emptied (e.g. after removing)
+    emailsOffset = Math.max(0, Math.floor((d.total - 1) / EMAILS_PAGE) * EMAILS_PAGE);
+    return loadEmails();
+  }
+  renderEmails(d);
+}
+
+function reloadEmails() {
+  loadEmails().catch(e => { $("emailsMsg").textContent = "⚠ " + e.message; });
+}
+
+$("emailsAccount").onchange = (e) => { emailsAccount = e.target.value; emailsList = ""; emailsOffset = 0; reloadEmails(); };
+$("emailsList").onchange = (e) => { emailsList = e.target.value; emailsOffset = 0; reloadEmails(); };
+$("emailSearch").addEventListener("input", (e) => {
+  clearTimeout(emailsTimer);
+  emailsTimer = setTimeout(() => { emailsQuery = e.target.value.trim(); emailsOffset = 0; reloadEmails(); }, 300);
+});
+$("emailsPrev").onclick = () => { emailsOffset = Math.max(0, emailsOffset - EMAILS_PAGE); reloadEmails(); };
+$("emailsNext").onclick = () => { emailsOffset += EMAILS_PAGE; reloadEmails(); };
+$("emailsCsv").onclick = () => download(
+  `/admin/emails.csv?` + emailsQueryString({ account: emailsAccount }), "emails.csv", $("emailsMsg"));
+$("emailsTable").onclick = (e) => {
+  const btn = e.target.closest("button[data-del]");
+  if (!btn || btn.disabled) return;
+  if (!confirm(`Remove ${btn.dataset.email} from the list "${btn.dataset.list}"? Their other data stays.`)) return;
+  action(btn, async () => {
+    await api(`/admin/accounts/${encodeURIComponent(emailsAccount)}/emails?` +
+      new URLSearchParams({ user_id: btn.dataset.del, list: btn.dataset.list }), { method: "DELETE" });
+    await loadEmails();
+    return `Removed ${btn.dataset.email}`;
+  }, $("emailsMsg"));
+};
 
 renderAccStats();
 load();

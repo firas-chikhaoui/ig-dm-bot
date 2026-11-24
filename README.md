@@ -12,17 +12,26 @@ Someone comments a keyword on your reel. The bot replies under the comment, send
 - 💬 **Public comment replies**: picked at random from a list so they don't look spammy
 - 📩 **DM flows with buttons**: postback buttons (go to another step) and link buttons
 - ✅ **Follow gate**: checks whether the user follows you before sending the link
-- 📧 **Email capture**: validates the email and saves it to a waitlist (export as CSV)
+- 📧 **Email capture**: validates the email and saves it to a waitlist, per account and list (browse, search and export as CSV in the dashboard)
 - 🔒 **Privacy policy and data deletion** pages built in (Meta requires both), plus a "delete my data" DM command and Meta's deletion callback
 - 🔑 **Automatic token refresh**: the 60-day Instagram token is renewed in the background before it expires
 - 👥 **Multiple accounts**: Instagram accounts and their tokens live in the database (seeded from `.env`), with pause/resume; webhook events are routed to the right account automatically
 - 🔗 **Connect Instagram** button: add an account with the official Instagram login, no copying tokens by hand
 - 🚨 **Error alerts**: failed Instagram API calls are logged clearly, and optionally sent to you on Telegram
+- 🖥️ **Web dashboard** behind a password login: connected accounts and token health, pause/resume, 30-day stats per account, a rules editor with live validation, and the collected emails with CSV download
 - 🔁 **Hot reload**: edit `rules.yaml` while the bot runs. A broken file never takes the bot down.
 - 🛡️ Webhook signature check, duplicate-event protection, loop protection, once-per-user per reel
 - 🌐 **One-command production deploy**: Docker Compose + Caddy with automatic HTTPS
 - 🧪 Tests and a `DRY_RUN` mode
 - 📝 **Meta App Review guide** with ready-to-paste permission texts and a screencast script ([docs/app-review.md](docs/app-review.md))
+
+## Screenshots
+
+| Dashboard | Stats per account | Emails per account |
+|---|---|---|
+| [![Dashboard](docs/screenshots/dashboard.png)](docs/screenshots/dashboard.png) | [![Stats per account](docs/screenshots/stats.png)](docs/screenshots/stats.png) | [![Emails per account](docs/screenshots/emails.png)](docs/screenshots/emails.png) |
+
+<sub>Demo data. The [playground](#see-it-with-your-own-eyes-the-playground-) shows the DM side.</sub>
 
 ## How it works
 
@@ -341,7 +350,8 @@ Open `https://YOUR-DOMAIN/admin` and sign in with your admin password. The dashb
 - per account: **⏸ Pause / ▶ Resume** and **🔑** to refresh its token now
 - 📉 **stats per account** for the last 30 days: matches (flows started by a comment or DM keyword), DMs sent, button clicks and emails collected, with all-time totals and a daily chart. Pick the account in the list (or click its name) and the metric above the chart. Activity recorded before per-account stats existed counts for the `.env` account
 - ✏️ a **rules editor**: pick an account and edit its rules as YAML right in the browser. The rules are checked as you type, with the same validation the bot uses (YAML errors show the line and column), and **💾 Save** (or Ctrl/Cmd+S) is only possible when they are valid. Saved rules are live immediately, no restart. An account that still uses `rules.yaml` gets its own copy when you save; **Use rules.yaml** deletes its own rules again. **🧪 Test in playground** opens the playground with your unsaved rules (needs `DRY_RUN=true`; the draft stays in your browser and nothing is sent to Instagram)
-- buttons to download the email list as CSV, send a test alert and connect another Instagram account
+- 📧 **emails per account**: every address an account collected, newest first, with username, list, flow and date. Filter by list, search by email or username, page through large lists, and **⬇ Download CSV** for exactly what you see (account + list + search). **✕** removes one address from one list (for example when someone unsubscribes); the person's other data stays. To delete everything about someone use `DELETE /admin/users/<id>` (see [Privacy](#privacy-policy-and-data-deletion-required-by-meta))
+- buttons to download all emails of all accounts as one CSV, send a test alert and connect another Instagram account
 
 The status of an account is one of:
 
@@ -380,7 +390,9 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 | `GET /admin/login`, `POST /admin/login`, `POST /admin/logout` | Dashboard sign in / sign out |
 | `GET /admin/stats?token=ADMIN_TOKEN` | Counts of triggers, button clicks, follow checks and emails |
 | `GET /admin/activity?token=ADMIN_TOKEN&days=14` | Events per day and the most started flows |
-| `GET /admin/emails.csv?token=ADMIN_TOKEN&list=waitlist` | Downloads the collected emails |
+| `GET /admin/emails.csv?token=ADMIN_TOKEN&account=ID&list=waitlist` | Downloads the collected emails as CSV (`account`, `list` and search `q` optional; default: everything) |
+| `GET /admin/accounts/<id>/emails?list=&q=&limit=50&offset=0&token=ADMIN_TOKEN` | Emails of one account, newest first, with its lists and their sizes |
+| `DELETE /admin/accounts/<id>/emails?user_id=…&list=…&token=ADMIN_TOKEN` | Removes one person's address from one list of an account |
 | `GET /admin/accounts?token=ADMIN_TOKEN` | Connected Instagram accounts with status (`health`) and token health |
 | `GET /admin/accounts/<id>/stats?days=30&token=ADMIN_TOKEN` | Matches, DMs, clicks and emails of one account per UTC day (`days` 1–90), plus totals |
 | `POST /admin/accounts/<id>/pause?token=ADMIN_TOKEN` | Pauses an account (its events are ignored); `/resume` turns it back on |
@@ -403,7 +415,8 @@ While `ADMIN_PASSWORD_HASH` is empty, the login accepts `ADMIN_TOKEN` as passwor
 ```
 app/
   main.py        web server: webhook + admin endpoints
-  admin.html     admin dashboard (stats, per-account charts, accounts, pause/resume, CSV export)
+  admin.html     admin dashboard (stats, per-account charts, accounts, pause/resume,
+                 rules editor, emails per account + CSV export)
   auth.py        admin login: password hash, session cookie, login rate limit
   bot.py         flow engine (comments, buttons, follow gate, email)
   rules.py       rules loader + validation: rules.yaml (hot reload) and rules per account
@@ -420,7 +433,8 @@ rules.yaml       your reels, keywords and flows
 Caddyfile        HTTPS reverse proxy for production (docker compose --profile https)
 docker-compose.yml
 scripts/         accounts.py, list_media.py, refresh_token.py, simulate.py
-docs/            app-review.md (Meta App Review: permission texts, screencast script)
+docs/            app-review.md (Meta App Review: permission texts, screencast script),
+                 screenshots/
 tests/
 ```
 
@@ -430,6 +444,7 @@ tests/
 - [x] Pause and resume accounts from the dashboard
 - [x] Stats per account with a 30-day chart
 - [x] Edit rules from the dashboard
+- [x] Emails per account in the dashboard, with search and CSV download
 - [x] Multiple Instagram accounts
 - [ ] Send waitlist emails to a newsletter tool (Mailchimp, Brevo, etc.)
 
